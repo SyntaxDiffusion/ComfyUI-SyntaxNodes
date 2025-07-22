@@ -1,0 +1,26 @@
+[project]
+name = "syntax_nodes"
+description = "a collection of ComfyUI image processing nodes"
+version = "1.0"
+# Change this line:
+# license = "LICENSE"
+# To this (assuming you have a LICENSE file in your repo root):
+license = { file = "LICENSE" }
+dependencies = [
+    "Pillow",
+    "opencv-python",
+    "numpy",
+    "torch",
+    "librosa",
+    "scipy",
+    "mediapipe"
+]
+
+[project.urls]
+Repository = "https://github.com/dream-computing/syntax_nodes.git"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "dream-computing"
+DisplayName = "syntax_nodes"
+Icon = ""
