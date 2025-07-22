@@ -23,13 +23,13 @@ class PixelScatterNode:
                 "stochastic_drop_chance": ("FLOAT", { # Chance (0-1) to randomly skip rendering a bright block
                     "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01 }),
                 "max_jitter_distance": ("INT", { # Max random displacement distance in pixels
-                    "default": 100, "min": 0, "max": 1024, "step": 1 }), # Increased max
+                    "default": 100, "min": 0, "max": 1024, "step": 1 }),
                 "jitter_luminance_power": ("FLOAT", { # Controls how block brightness scales jitter range (>1 = brighter jitters further)
                      "default": 1.5, "min": 0.1, "max": 5.0, "step": 0.1 }),
-                # --- Appearance ---
-                "color_mode": (["Original Color", "Matrix Color"], {"default": "Original Color"}),
-                "matrix_color": ("COLOR", {"default": "#20FF80"}),
-                "matrix_intensity_scale": ("FLOAT", { "default": 1.8, "min": 0.1, "max": 10.0, "step": 0.05 }), # Increased range
+                # --- Simplified Appearance ---
+                "color_mode": (["Original Color", "Black Background"], {"default": "Original Color"}),
+                "unused_matrix_color": ("COLOR", {"default": "#20FF80"}),  # Keep for compatibility but unused
+                "unused_matrix_intensity": ("FLOAT", {"default": 1.8, "min": 0.1, "max": 10.0, "step": 0.05}),  # Keep for compatibility but unused
                 "size_mode": (["Fixed", "Variable"], {"default": "Variable"}),
                 "min_draw_size": ("INT", {"default": 1, "min": 1, "max": 32, "step": 1}), # Min size if variable
                 "size_luminance_power": ("FLOAT", { # How strongly luminance affects variable size
@@ -77,15 +77,20 @@ class PixelScatterNode:
 
     def process_image(self, image, base_block_size, render_threshold, stochastic_drop_chance,
                       max_jitter_distance, jitter_luminance_power,
-                      color_mode, matrix_color, matrix_intensity_scale,
+                      color_mode, unused_matrix_color, unused_matrix_intensity,
                       size_mode, min_draw_size, size_luminance_power, alpha_luminance_power,
                       background_color, seed, mask=None):
         # --- Setup ---
         device = image.device
         batch_size, H, W, _ = image.shape
         pbar = ProgressBar(batch_size)
-        bg_color_rgb = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-        matrix_color_rgb = tuple(int(matrix_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+        
+        # Determine background color based on mode
+        if color_mode == "Black Background":
+            bg_color_rgb = (0, 0, 0)  # Force black background
+        else:  # "Original Color"
+            bg_color_rgb = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+        
         processed_tensors = []
         master_seed = seed
 
@@ -119,8 +124,7 @@ class PixelScatterNode:
                     pil_image_rgb, mask_array, base_block_size, bg_color_rgb,
                     render_threshold, stochastic_drop_chance,
                     max_jitter_distance, jitter_luminance_power,
-                    color_mode, matrix_color_rgb, matrix_intensity_scale,
-                    size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                    color_mode, size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
                 )
                 
                 # Blend base and effect using mask
@@ -136,8 +140,7 @@ class PixelScatterNode:
                     pil_image_rgb, base_block_size, bg_color_rgb,
                     render_threshold, stochastic_drop_chance,
                     max_jitter_distance, jitter_luminance_power,
-                    color_mode, matrix_color_rgb, matrix_intensity_scale,
-                    size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                    color_mode, size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
                 )
 
             # --- Output ---
@@ -158,8 +161,7 @@ class PixelScatterNode:
 
     def create_point_scatter_with_mask(self, image_rgb, mask_array, block_size, background_color,
                                      render_thresh, drop_chance, max_jitter, jitter_power,
-                                     color_mode, matrix_rgb, matrix_intensity,
-                                     size_mode, min_size, size_power, alpha_power):
+                                     color_mode, size_mode, min_size, size_power, alpha_power):
         """Create scatter effect - mask is applied per-pixel during effect calculation"""
         width, height = image_rgb.size
         if width == 0 or height == 0: 
@@ -220,12 +222,8 @@ class PixelScatterNode:
                     draw_center_x = orig_center_x + dx
                     draw_center_y = orig_center_y + dy
 
-                    # Determine appearance
-                    base_color = avg_color_rgb
-                    draw_color = base_color
-                    if color_mode == "Matrix Color":
-                        intensity = max(0.0, min(1.0, effective_luminance)) * matrix_intensity
-                        draw_color = self.scale_color_brightness(matrix_rgb, intensity)
+                    # Determine color - simplified logic
+                    draw_color = avg_color_rgb  # Always use original RGB values
 
                     # Apply alpha simulation
                     if alpha_power > 0:
@@ -249,25 +247,9 @@ class PixelScatterNode:
 
         return output_img
 
-    # --- Helpers ---
-    def calculate_luminance(self, rgb_tuple):
-        if not isinstance(rgb_tuple, tuple) or len(rgb_tuple) < 3: return 0.0
-        r, g, b = [x / 255.0 for x in rgb_tuple[:3]]
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-    def scale_color_brightness(self, color_rgb, scale_factor):
-        """Multiplies RGB values by factor, clamps 0-255."""
-        scale_factor = max(0.0, scale_factor) # Ensure non-negative
-        r = max(0, min(255, int(color_rgb[0] * scale_factor)))
-        g = max(0, min(255, int(color_rgb[1] * scale_factor)))
-        b = max(0, min(255, int(color_rgb[2] * scale_factor)))
-        return (r, g, b)
-
-    # --- Original full-image effect (kept for when no mask) ---
     def create_point_scatter(self, image_rgb, block_size, background_color,
                              render_thresh, drop_chance, max_jitter, jitter_power,
-                             color_mode, matrix_rgb, matrix_intensity,
-                             size_mode, min_size, size_power, alpha_power):
+                             color_mode, size_mode, min_size, size_power, alpha_power):
         """Scatters points/blocks based on luminance and randomness."""
         width, height = image_rgb.size
         if width == 0 or height == 0: return Image.new('RGB', (1, 1), background_color)
@@ -323,16 +305,12 @@ class PixelScatterNode:
                     draw_center_x = orig_center_x + dx
                     draw_center_y = orig_center_y + dy
 
-                    # Determine appearance
-                    base_color = data['color']
-                    draw_color = base_color
-                    if color_mode == "Matrix Color":
-                        intensity = max(0.0, min(1.0, lumi)) * matrix_intensity # Use original lumi for intensity
-                        draw_color = self.scale_color_brightness(matrix_rgb, intensity)
+                    # Use original color - simplified
+                    draw_color = data['color']
 
                     # Apply alpha simulation (modulate brightness)
                     if alpha_power > 0:
-                        alpha_factor = lumi_scale ** alpha_power # Scale alpha based on thresholded lumi
+                        alpha_factor = lumi_scale ** alpha_power
                         draw_color = self.scale_color_brightness(draw_color, alpha_factor)
 
                     # Determine draw size
@@ -353,6 +331,20 @@ class PixelScatterNode:
                         draw.rectangle([x0, y0, x1, y1], fill=draw_color)
 
         return output_img
+
+    # --- Helpers ---
+    def calculate_luminance(self, rgb_tuple):
+        if not isinstance(rgb_tuple, tuple) or len(rgb_tuple) < 3: return 0.0
+        r, g, b = [x / 255.0 for x in rgb_tuple[:3]]
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    def scale_color_brightness(self, color_rgb, scale_factor):
+        """Multiplies RGB values by factor, clamps 0-255."""
+        scale_factor = max(0.0, scale_factor) # Ensure non-negative
+        r = max(0, min(255, int(color_rgb[0] * scale_factor)))
+        g = max(0, min(255, int(color_rgb[1] * scale_factor)))
+        b = max(0, min(255, int(color_rgb[2] * scale_factor)))
+        return (r, g, b)
 
     # --- Helper functions t2p, p2t (remain the same) ---
     def t2p(self, t):
