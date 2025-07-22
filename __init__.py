@@ -33,7 +33,7 @@ from .cyberpunk_magnify_node import CyberpunkMagnifyNode
 from .rgb_streak_node import RGBStreakNode
 from .voxel_node import VoxelNode
 from .papercraftnode import PaperCraftNode
-from .uptrack_node import UpTrackNode
+from .frequency_beat_sync_advanced import FrequencyBeatSyncNode as FrequencyBeatSyncNodeAdvanced
 from .pixel_scatter_node import PixelScatterNode
 
 # Map the node classes for ComfyUI to recognize them
@@ -54,7 +54,7 @@ NODE_CLASS_MAPPINGS = {
     "RGBStreakNode": RGBStreakNode,
     "VoxelNode": VoxelNode,
     "PaperCraftNode": PaperCraftNode,
-    "UpTrackNode": UpTrackNode,
+    "FrequencyBeatSyncNodeAdvanced": FrequencyBeatSyncNodeAdvanced,
     "PixelScatterNode": PixelScatterNode,
 }
 
@@ -76,7 +76,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RGBStreakNode": "RGB Streak Effect",
     "VoxelNode": "Voxel Block Effect",
     "PaperCraftNode": "Paper Craft Effect",
-    "UpTrackNode": "Upright Person Tracking",
+    "FrequencyBeatSyncNodeAdvanced": "Beat Sync (Advanced)",
     "PixelScatterNode": "Pixel Scatter Effect",
 }
 

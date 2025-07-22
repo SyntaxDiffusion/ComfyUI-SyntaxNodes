@@ -4,12 +4,13 @@ import torch
 from comfy.utils import ProgressBar
 import random
 import math
+import cv2
 
 
 class PixelScatterNode:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"PixelMeltNode (Point Scatter Glitch Style) using device: {self.device}")
+        print(f"PixelScatterNode (Point Scatter Glitch Style) using device: {self.device}")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -40,7 +41,7 @@ class PixelScatterNode:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
-                "mask": ("MASK",), # Mask applies to the final output
+                "mask": ("MASK",), # Mask applies to where the effect is calculated
             }
         }
 
@@ -48,12 +49,39 @@ class PixelScatterNode:
     FUNCTION = "process_image"
     CATEGORY = "SyntaxNodes/VisualEffects" # Or Glitch
 
+    def get_mask_array(self, mask, target_shape):
+        """Convert mask to proper format and shape - copied from working node"""
+        if mask is None:
+            return np.ones((target_shape[0], target_shape[1]), dtype=np.float32)
+        
+        # Convert tensor to numpy if needed
+        if torch.is_tensor(mask):
+            # Handle different tensor formats
+            if len(mask.shape) == 4:  # BCHW format
+                mask = mask[0, 0]  # Take first batch, first channel
+            elif len(mask.shape) == 3:  # CHW format
+                mask = mask[0]  # Take first channel
+            mask = mask.cpu().numpy()
+        
+        # Ensure mask is float32 and properly scaled
+        mask = mask.astype(np.float32)
+        if mask.max() > 1.0:
+            mask = mask / 255.0
+        
+        # Resize mask to match target shape
+        if mask.shape[0] != target_shape[0] or mask.shape[1] != target_shape[1]:
+            mask = cv2.resize(mask, (target_shape[1], target_shape[0]), 
+                            interpolation=cv2.INTER_LINEAR)
+        
+        return mask
+
     def process_image(self, image, base_block_size, render_threshold, stochastic_drop_chance,
                       max_jitter_distance, jitter_luminance_power,
                       color_mode, matrix_color, matrix_intensity_scale,
                       size_mode, min_draw_size, size_luminance_power, alpha_luminance_power,
                       background_color, seed, mask=None):
         # --- Setup ---
+        device = image.device
         batch_size, H, W, _ = image.shape
         pbar = ProgressBar(batch_size)
         bg_color_rgb = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
@@ -75,47 +103,151 @@ class PixelScatterNode:
                 processed_tensors.append(self.p2t(placeholder)); continue
 
             pil_image_rgb = pil_image.convert('RGB')
-            original_array = np.array(pil_image_rgb) if mask is not None else None
-
-            # --- Core Point Scatter Logic ---
-            processed_image = self.create_point_scatter(
-                pil_image_rgb, base_block_size, bg_color_rgb,
-                render_threshold, stochastic_drop_chance,
-                max_jitter_distance, jitter_luminance_power,
-                color_mode, matrix_color_rgb, matrix_intensity_scale,
-                size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+            
+            # Get mask for this frame using the robust method
+            mask_array = self.get_mask_array(
+                mask[idx] if mask is not None and idx < mask.shape[0] else None, 
+                (H, W)
             )
-            processed_array = np.array(processed_image)
 
-            # --- Masking (Standard) ---
-            final_array = processed_array
-            if mask is not None and idx < mask.shape[0]:
-                # ... (same masking logic as previous versions) ...
-                single_mask_tensor = mask[idx:idx+1]
-                if single_mask_tensor.shape[1] == H and single_mask_tensor.shape[2] == W:
-                    mask_array = single_mask_tensor.squeeze().cpu().numpy()
-                    if len(mask_array.shape) == 2: mask_array = mask_array[..., np.newaxis]
-                    if original_array is not None and original_array.shape[:2] == mask_array.shape[:2]:
-                         final_array = original_array * (1 - mask_array) + processed_array * mask_array
-                         final_array = final_array.astype(np.uint8)
-                    else:
-                        if original_array is None: final_array = (processed_array * mask_array).astype(np.uint8)
-                        else: print(f"Mask/Image shape mismatch idx {idx}. Skipping."); final_array = processed_array
-                else: print(f"Mask dimensions mismatch idx {idx}. Skipping."); final_array = processed_array
+            # --- Create base and effect images ---
+            if mask is not None:
+                # Start with original image as base
+                base_image = pil_image_rgb.copy()
+                # Create effect image with scatter effect
+                effect_image = self.create_point_scatter_with_mask(
+                    pil_image_rgb, mask_array, base_block_size, bg_color_rgb,
+                    render_threshold, stochastic_drop_chance,
+                    max_jitter_distance, jitter_luminance_power,
+                    color_mode, matrix_color_rgb, matrix_intensity_scale,
+                    size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                )
+                
+                # Blend base and effect using mask
+                base_array = np.array(base_image)
+                effect_array = np.array(effect_image)
+                mask_array_3d = np.stack([mask_array] * 3, axis=-1)
+                
+                final_array = base_array * (1 - mask_array_3d) + effect_array * mask_array_3d
+                processed_image = Image.fromarray(final_array.astype(np.uint8))
+            else:
+                # No mask - apply to entire image as before
+                processed_image = self.create_point_scatter(
+                    pil_image_rgb, base_block_size, bg_color_rgb,
+                    render_threshold, stochastic_drop_chance,
+                    max_jitter_distance, jitter_luminance_power,
+                    color_mode, matrix_color_rgb, matrix_intensity_scale,
+                    size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                )
 
             # --- Output ---
-            final_image_pil = Image.fromarray(final_array)
-            processed_tensor = self.p2t(final_image_pil)
-            if processed_tensor is not None: processed_tensors.append(processed_tensor)
+            processed_tensor = self.p2t(processed_image)
+            if processed_tensor is not None: 
+                processed_tensors.append(processed_tensor)
             pbar.update_absolute(idx + 1)
 
         # --- Batch Concat ---
-        if not processed_tensors: print("Error: No images processed."); return (image,)
-        device = processed_tensors[0].device
+        if not processed_tensors: 
+            print("Error: No images processed."); return (image,)
         tensors_on_device = [t.to(device) for t in processed_tensors]
-        try: final_output = torch.cat(tensors_on_device, dim=0)
-        except Exception as e: print(f"Error concatenating: {e}"); return(image,)
+        try: 
+            final_output = torch.cat(tensors_on_device, dim=0)
+        except Exception as e: 
+            print(f"Error concatenating: {e}"); return(image,)
         return (final_output,)
+
+    def create_point_scatter_with_mask(self, image_rgb, mask_array, block_size, background_color,
+                                     render_thresh, drop_chance, max_jitter, jitter_power,
+                                     color_mode, matrix_rgb, matrix_intensity,
+                                     size_mode, min_size, size_power, alpha_power):
+        """Create scatter effect - mask is applied per-pixel during effect calculation"""
+        width, height = image_rgb.size
+        if width == 0 or height == 0: 
+            return Image.new('RGB', (1, 1), background_color)
+
+        W_blocks = math.ceil(width / block_size)
+        H_blocks = math.ceil(height / block_size)
+
+        # Create output image with background
+        output_img = Image.new('RGB', (width, height), background_color)
+        draw = ImageDraw.Draw(output_img)
+
+        for yb in range(H_blocks):
+            for xb in range(W_blocks):
+                x_start, y_start = xb * block_size, yb * block_size
+                x_end, y_end = min(width, x_start + block_size), min(height, y_start + block_size)
+                
+                # Get average mask value for this block
+                block_mask = mask_array[y_start:y_end, x_start:x_end]
+                mask_value = np.mean(block_mask) if block_mask.size > 0 else 0.0
+                
+                # Skip if mask value is too low
+                if mask_value < 0.01:
+                    continue
+
+                # Get color and luminance for this block
+                sample_box = (x_start, y_start, x_end, y_end)
+                region = image_rgb.crop(sample_box)
+                if region.size[0] <= 0 or region.size[1] <= 0:
+                    continue
+                
+                try:
+                    stat = ImageStat.Stat(region)
+                    avg_color_float = stat.mean[:3]
+                    avg_color_rgb = tuple(int(c) for c in avg_color_float)
+                    luminance = self.calculate_luminance(avg_color_rgb)
+                except Exception:
+                    continue
+
+                # Apply mask to luminance - this is the key!
+                effective_luminance = luminance * mask_value
+
+                # Apply effect logic
+                if effective_luminance >= render_thresh and random.random() >= drop_chance:
+                    # Calculate luminance scale (0-1 above threshold)
+                    lumi_scale = max(0.0, min(1.0, (effective_luminance - render_thresh) / (1.0 - render_thresh + 1e-6)))
+
+                    # Calculate jitter
+                    current_max_jitter = max_jitter * (lumi_scale ** jitter_power)
+                    angle = random.uniform(0, 2 * math.pi)
+                    distance = random.uniform(0, current_max_jitter)
+                    dx = distance * math.cos(angle)
+                    dy = distance * math.sin(angle)
+
+                    # Calculate draw position
+                    orig_center_x = (xb + 0.5) * block_size
+                    orig_center_y = (yb + 0.5) * block_size
+                    draw_center_x = orig_center_x + dx
+                    draw_center_y = orig_center_y + dy
+
+                    # Determine appearance
+                    base_color = avg_color_rgb
+                    draw_color = base_color
+                    if color_mode == "Matrix Color":
+                        intensity = max(0.0, min(1.0, effective_luminance)) * matrix_intensity
+                        draw_color = self.scale_color_brightness(matrix_rgb, intensity)
+
+                    # Apply alpha simulation
+                    if alpha_power > 0:
+                        alpha_factor = lumi_scale ** alpha_power
+                        draw_color = self.scale_color_brightness(draw_color, alpha_factor)
+
+                    # Determine size
+                    draw_size = block_size
+                    if size_mode == "Variable":
+                        size_factor = lumi_scale ** size_power
+                        draw_size = max(min_size, int(block_size * size_factor))
+
+                    # Draw the scattered point
+                    if draw_size >= 1:
+                        half_size = draw_size / 2.0
+                        x0 = int(draw_center_x - half_size)
+                        y0 = int(draw_center_y - half_size)
+                        x1 = int(draw_center_x + half_size)
+                        y1 = int(draw_center_y + half_size)
+                        draw.rectangle([x0, y0, x1, y1], fill=draw_color)
+
+        return output_img
 
     # --- Helpers ---
     def calculate_luminance(self, rgb_tuple):
@@ -131,7 +263,7 @@ class PixelScatterNode:
         b = max(0, min(255, int(color_rgb[2] * scale_factor)))
         return (r, g, b)
 
-    # --- Core Logic ---
+    # --- Original full-image effect (kept for when no mask) ---
     def create_point_scatter(self, image_rgb, block_size, background_color,
                              render_thresh, drop_chance, max_jitter, jitter_power,
                              color_mode, matrix_rgb, matrix_intensity,
@@ -217,11 +349,8 @@ class PixelScatterNode:
                     y1 = int(draw_center_y + half_size)
 
                     # Draw (clip check is handled by PIL draw)
-                    # Use ellipse for more point-cloud like feel? Or keep rectangle?
-                    # Let's use rectangle for consistency with blocks, size variation helps.
                     if draw_size >= 1: # Only draw if size is positive
                         draw.rectangle([x0, y0, x1, y1], fill=draw_color)
-
 
         return output_img
 
