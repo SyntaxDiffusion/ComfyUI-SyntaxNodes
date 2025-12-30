@@ -30,6 +30,14 @@ This pack includes the following nodes:
 *   [Depth to LIDAR Effect](#depth-to-lidar-effect)
 *   [Region Boundary Node](#region-boundary-node)
 
+**3D Gaussian Splatting:**
+
+*   [SHARP 3D Gaussian Splat](#sharp-3d-gaussian-splat)
+*   [Preview 3D Gaussian Splat](#preview-3d-gaussian-splat)
+*   [Preview Gaussian Splat Video](#preview-gaussian-splat-video)
+*   [Load Gaussian Splat](#load-gaussian-splat)
+*   [Save Gaussian Splat](#save-gaussian-splat)
+
 **Utility & Synchronization:**
 
 *   [Beat Sync](#beat-sync)
@@ -330,6 +338,93 @@ Turn effect intensity to max for a stronger effect within the edit.
 3.  Connect the `IMAGE` output from your source node to the `image` (or equivalent) input of the SyntaxNode.
 4.  Adjust the parameters as needed. Check the node's tooltips in ComfyUI for specific parameter details.
 5.  Connect the `IMAGE` output of the SyntaxNode to a `Preview Image` node or another processing node.
+
+---
+
+### SHARP 3D Gaussian Splat
+
+Generates a 3D Gaussian Splat from a single image using Apple's SHARP model. Creates an interactive 3D scene that can be viewed and rendered as a flythrough video.
+
+**Requirements:**
+- [ml-sharp](https://github.com/apple/ml-sharp) - Apple's SHARP model (install with `pip install -e .` from the repo)
+- [gsplat](https://github.com/nerfstudio-project/gsplat) - For video rendering (CUDA required)
+
+**Important:** gsplat requires pre-built CUDA wheels for Windows. Install from:
+```bash
+pip install gsplat -f https://docs.gsplat.studio/whl/gsplat/
+```
+See all available wheels at: https://docs.gsplat.studio/whl/gsplat/
+
+**Parameters:**
+*   `image`: Input image to convert to 3D.
+*   `focal_length_mm`: Focal length in mm (35mm equivalent). Default 30mm if unknown.
+*   `output_filename`: Base filename for the output PLY file.
+*   `render_video`: Whether to render a flythrough video (requires CUDA).
+*   `video_frames`: Number of frames for the flythrough video.
+*   `camera_path`: Camera trajectory type:
+    - `rotate_forward` - Orbit around subject while pushing in (default)
+    - `rotate` - Simple orbit around the subject
+    - `swipe` - Side-to-side camera movement
+    - `shake` - Small, subtle camera motion
+*   `camera_distance`: Distance from subject (0 = auto based on scene).
+*   `max_disparity`: Maximum parallax/3D effect strength.
+*   `max_zoom`: Maximum zoom amount for rotate_forward path.
+*   `loop_count`: Number of times to repeat the camera path.
+
+**Outputs:**
+*   `ply_path`: Path to the generated PLY file.
+*   `video_path`: Path to the rendered flythrough video.
+*   `preview_image`: Original input image for preview.
+
+---
+
+### Preview 3D Gaussian Splat
+
+Interactive WebGL viewer for 3D Gaussian Splat PLY files. Displays the splat in a resizable 3D viewer embedded in the node.
+
+**Controls:**
+*   Drag to rotate
+*   Scroll to zoom
+*   Shift+drag to pan
+
+**Parameters:**
+*   `ply_path`: Path to the .ply Gaussian Splat file.
+
+---
+
+### Preview Gaussian Splat Video
+
+Video player for Gaussian Splat flythrough videos. Displays the rendered MP4 video with playback controls.
+
+**Parameters:**
+*   `video_path`: Path to the rendered video file (.mp4).
+
+---
+
+### Load Gaussian Splat
+
+Load a Gaussian Splat PLY file from the input/3d or output directory.
+
+**Parameters:**
+*   `ply_file`: Select from available PLY files.
+
+**Outputs:**
+*   `ply_path`: Full path to the selected PLY file.
+
+---
+
+### Save Gaussian Splat
+
+Save/copy a Gaussian Splat PLY file with a custom name to the output directory.
+
+**Parameters:**
+*   `ply_path`: Path to the source PLY file.
+*   `output_name`: Output filename (without extension).
+
+**Outputs:**
+*   `saved_path`: Path to the saved PLY file.
+
+---
 
 ## Contributing
 

@@ -35,6 +35,9 @@ from .voxel_node import VoxelNode
 from .papercraftnode import PaperCraftNode
 from .frequency_beat_sync_advanced import FrequencyBeatSyncNode as FrequencyBeatSyncNodeAdvanced
 from .pixel_scatter_node import PixelScatterNode
+from .audio_reactive_template import AudioReactiveTemplateNode
+from .ml_sharp_node import MLSharpNode, MLSharpBatchNode
+from .preview_3d_gs_node import Preview3DGaussianSplat, PreviewGaussianSplatVideo, LoadGaussianSplat, SaveGaussianSplat
 
 # Map the node classes for ComfyUI to recognize them
 NODE_CLASS_MAPPINGS = {
@@ -56,6 +59,13 @@ NODE_CLASS_MAPPINGS = {
     "PaperCraftNode": PaperCraftNode,
     "FrequencyBeatSyncNodeAdvanced": FrequencyBeatSyncNodeAdvanced,
     "PixelScatterNode": PixelScatterNode,
+    "AudioReactiveTemplateNode": AudioReactiveTemplateNode,
+    "MLSharpNode": MLSharpNode,
+    "MLSharpBatchNode": MLSharpBatchNode,
+    "Preview3DGaussianSplat": Preview3DGaussianSplat,
+    "PreviewGaussianSplatVideo": PreviewGaussianSplatVideo,
+    "LoadGaussianSplat": LoadGaussianSplat,
+    "SaveGaussianSplat": SaveGaussianSplat,
 }
 
 # Provide user-friendly display names for the nodes
@@ -67,7 +77,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FrequencyBeatSyncNode": "Beat Sync",
     "GhostingNode": "Ghosting/Afterimage Effect",
     "DepthToLidarEffectNode": "Depth to LIDAR Effect",
-    "LuminanceParticleNode": "Luminance Particle Effect", 
+    "LuminanceParticleNode": "Luminance Particle Effect",
     "EdgeMeasurementOverlayNode": "Edge Measurement Overlay",
     "EdgeTracingNode": "Edge Tracing Animation",
     "VariableLineWidthEffectNode": "Variable Line Width Effect",
@@ -78,11 +88,21 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PaperCraftNode": "Paper Craft Effect",
     "FrequencyBeatSyncNodeAdvanced": "Beat Sync (Advanced)",
     "PixelScatterNode": "Pixel Scatter Effect",
+    "AudioReactiveTemplateNode": "Audio-Reactive Template",
+    "MLSharpNode": "SHARP 3D Gaussian Splat",
+    "MLSharpBatchNode": "SHARP 3D Gaussian Splat (Batch)",
+    "Preview3DGaussianSplat": "Preview 3D Gaussian Splat",
+    "PreviewGaussianSplatVideo": "Preview Gaussian Splat Video",
+    "LoadGaussianSplat": "Load Gaussian Splat",
+    "SaveGaussianSplat": "Save Gaussian Splat",
 }
 
+# Web directory for frontend extensions
+WEB_DIRECTORY = "web/js"
 
 
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 print("--- Syntax Nodes: Custom Nodes Loaded ---")

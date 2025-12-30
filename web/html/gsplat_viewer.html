@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Gaussian Splat Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
+            font-family: system-ui, sans-serif;
+        }
+        #canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+        }
+        #loading .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-top-color: #888;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #666;
+            font-size: 11px;
+        }
+        #error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #f66;
+            font-size: 14px;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="loading">
+        <div class="spinner"></div>
+        Loading Gaussian Splat...
+    </div>
+    <div id="error"></div>
+    <div id="info">Drag to rotate | Scroll to zoom | Shift+drag to pan</div>
+
+<script>
+// Self-contained Gaussian Splat WebGL Renderer
+// No external dependencies
+
+class GaussianSplatViewer {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+        if (!this.gl) {
+            throw new Error('WebGL2 not supported');
+        }
+
+        this.camera = {
+            distance: 3.0,
+            rotX: 0.3,
+            rotY: 0,
+            panX: 0,
+            panY: 0,
+            fov: 50
+        };
+
+        this.splats = null;
+        this.program = null;
+        this.sortedIndices = null;
+        this.lastSortTime = 0;
+
+        this.setupShaders();
+        this.setupControls();
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+
+        // Listen for resize messages from parent (ComfyUI node)
+        window.addEventListener('message', (e) => {
+            if (e.data && e.data.type === 'resize') {
+                this.resize();
+            }
+        });
+    }
+
+    setupShaders() {
+        const gl = this.gl;
+
+        // Vertex shader for point-based splat rendering
+        const vsSource = `#version 300 es
+            precision highp float;
+
+            in vec3 position;
+            in vec3 color;
+            in float opacity;
+            in vec3 scale;
+            in vec4 rotation;
+
+            uniform mat4 viewMatrix;
+            uniform mat4 projMatrix;
+            uniform vec2 viewport;
+            uniform vec3 camPos;
+
+            out vec3 vColor;
+            out float vOpacity;
+            out vec2 vOffset;
+
+            void main() {
+                vec4 viewPos = viewMatrix * vec4(position, 1.0);
+                gl_Position = projMatrix * viewPos;
+
+                // Calculate splat size based on scale and distance
+                float avgScale = (scale.x + scale.y + scale.z) / 3.0;
+                float dist = length(viewPos.xyz);
+                float size = avgScale * viewport.y / dist * 2.0;
+                gl_PointSize = clamp(size, 1.0, 64.0);
+
+                vColor = color;
+                vOpacity = opacity;
+            }
+        `;
+
+        // Fragment shader
+        const fsSource = `#version 300 es
+            precision highp float;
+
+            in vec3 vColor;
+            in float vOpacity;
+
+            out vec4 fragColor;
+
+            void main() {
+                vec2 uv = gl_PointCoord * 2.0 - 1.0;
+                float r2 = dot(uv, uv);
+
+                // Gaussian falloff
+                float alpha = exp(-r2 * 2.0) * vOpacity;
+                if (alpha < 0.01) discard;
+
+                fragColor = vec4(vColor, alpha);
+            }
+        `;
+
+        const vs = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vs, vsSource);
+        gl.compileShader(vs);
+        if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+            console.error('VS:', gl.getShaderInfoLog(vs));
+        }
+
+        const fs = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fs, fsSource);
+        gl.compileShader(fs);
+        if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+            console.error('FS:', gl.getShaderInfoLog(fs));
+        }
+
+        this.program = gl.createProgram();
+        gl.attachShader(this.program, vs);
+        gl.attachShader(this.program, fs);
+        gl.linkProgram(this.program);
+
+        if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+            console.error('Program:', gl.getProgramInfoLog(this.program));
+        }
+
+        // Get locations
+        this.attribs = {
+            position: gl.getAttribLocation(this.program, 'position'),
+            color: gl.getAttribLocation(this.program, 'color'),
+            opacity: gl.getAttribLocation(this.program, 'opacity'),
+            scale: gl.getAttribLocation(this.program, 'scale'),
+            rotation: gl.getAttribLocation(this.program, 'rotation'),
+        };
+
+        this.uniforms = {
+            viewMatrix: gl.getUniformLocation(this.program, 'viewMatrix'),
+            projMatrix: gl.getUniformLocation(this.program, 'projMatrix'),
+            viewport: gl.getUniformLocation(this.program, 'viewport'),
+            camPos: gl.getUniformLocation(this.program, 'camPos'),
+        };
+    }
+
+    setupControls() {
+        let dragging = false;
+        let lastX = 0, lastY = 0;
+        let shiftKey = false;
+
+        this.canvas.addEventListener('mousedown', (e) => {
+            dragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            shiftKey = e.shiftKey;
+        });
+
+        window.addEventListener('mouseup', () => dragging = false);
+
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX;
+            lastY = e.clientY;
+
+            if (e.shiftKey || shiftKey) {
+                // Pan
+                this.camera.panX -= dx * 0.005 * this.camera.distance;
+                this.camera.panY += dy * 0.005 * this.camera.distance;
+            } else {
+                // Rotate
+                this.camera.rotY += dx * 0.01;
+                this.camera.rotX += dy * 0.01;
+                this.camera.rotX = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, this.camera.rotX));
+            }
+        });
+
+        this.canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            this.camera.distance *= 1 + e.deltaY * 0.001;
+            this.camera.distance = Math.max(0.1, Math.min(100, this.camera.distance));
+        }, { passive: false });
+
+        // Touch support
+        let lastTouch = null;
+        let lastTouchDist = 0;
+
+        this.canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                lastTouch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+            } else if (e.touches.length === 2) {
+                const dx = e.touches[1].clientX - e.touches[0].clientX;
+                const dy = e.touches[1].clientY - e.touches[0].clientY;
+                lastTouchDist = Math.sqrt(dx*dx + dy*dy);
+            }
+        });
+
+        this.canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (e.touches.length === 1 && lastTouch) {
+                const dx = e.touches[0].clientX - lastTouch.x;
+                const dy = e.touches[0].clientY - lastTouch.y;
+                lastTouch = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+
+                this.camera.rotY += dx * 0.01;
+                this.camera.rotX += dy * 0.01;
+                this.camera.rotX = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, this.camera.rotX));
+            } else if (e.touches.length === 2) {
+                const dx = e.touches[1].clientX - e.touches[0].clientX;
+                const dy = e.touches[1].clientY - e.touches[0].clientY;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+
+                if (lastTouchDist > 0) {
+                    this.camera.distance *= lastTouchDist / dist;
+                    this.camera.distance = Math.max(0.1, Math.min(100, this.camera.distance));
+                }
+                lastTouchDist = dist;
+            }
+        }, { passive: false });
+
+        this.canvas.addEventListener('touchend', () => {
+            lastTouch = null;
+            lastTouchDist = 0;
+        });
+    }
+
+    resize() {
+        const dpr = window.devicePixelRatio || 1;
+        this.canvas.width = this.canvas.clientWidth * dpr;
+        this.canvas.height = this.canvas.clientHeight * dpr;
+        this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    }
+
+    async loadPLY(url) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to load: ${response.status}`);
+
+        const buffer = await response.arrayBuffer();
+        return this.parsePLY(buffer);
+    }
+
+    parsePLY(buffer) {
+        const decoder = new TextDecoder();
+        const bytes = new Uint8Array(buffer);
+
+        // Find end of header
+        let headerEnd = 0;
+        const endHeader = 'end_header\n';
+        for (let i = 0; i < Math.min(bytes.length, 4096); i++) {
+            const slice = decoder.decode(bytes.slice(i, i + endHeader.length));
+            if (slice === endHeader) {
+                headerEnd = i + endHeader.length;
+                break;
+            }
+        }
+
+        if (headerEnd === 0) throw new Error('Invalid PLY header');
+
+        const header = decoder.decode(bytes.slice(0, headerEnd));
+        const lines = header.split('\n');
+
+        let vertexCount = 0;
+        for (const line of lines) {
+            if (line.startsWith('element vertex')) {
+                vertexCount = parseInt(line.split(' ')[2]);
+                break;
+            }
+        }
+
+        console.log(`Loading ${vertexCount} splats...`);
+
+        // Parse binary vertex data
+        // Format: x,y,z, f_dc_0,f_dc_1,f_dc_2, opacity, scale_0,scale_1,scale_2, rot_0,rot_1,rot_2,rot_3
+        const dataView = new DataView(buffer, headerEnd);
+        const bytesPerVertex = 14 * 4; // 14 floats
+
+        const positions = new Float32Array(vertexCount * 3);
+        const colors = new Float32Array(vertexCount * 3);
+        const opacities = new Float32Array(vertexCount);
+        const scales = new Float32Array(vertexCount * 3);
+        const rotations = new Float32Array(vertexCount * 4);
+
+        let offset = 0;
+        for (let i = 0; i < vertexCount; i++) {
+            // Position - flip Y and Z to correct coordinate system
+            // SHARP uses Y-up, Z-forward; we need to invert Y and Z
+            positions[i*3] = dataView.getFloat32(offset, true); offset += 4;
+            positions[i*3+1] = -dataView.getFloat32(offset, true); offset += 4;  // Flip Y
+            positions[i*3+2] = -dataView.getFloat32(offset, true); offset += 4;  // Flip Z
+
+            // Color (SH DC coefficients - convert to RGB)
+            const sh0 = dataView.getFloat32(offset, true); offset += 4;
+            const sh1 = dataView.getFloat32(offset, true); offset += 4;
+            const sh2 = dataView.getFloat32(offset, true); offset += 4;
+            // SH to RGB conversion (C0 coefficient)
+            const C0 = 0.28209479177387814;
+            colors[i*3] = Math.max(0, Math.min(1, 0.5 + C0 * sh0));
+            colors[i*3+1] = Math.max(0, Math.min(1, 0.5 + C0 * sh1));
+            colors[i*3+2] = Math.max(0, Math.min(1, 0.5 + C0 * sh2));
+
+            // Opacity (sigmoid)
+            const rawOpacity = dataView.getFloat32(offset, true); offset += 4;
+            opacities[i] = 1 / (1 + Math.exp(-rawOpacity));
+
+            // Scale (exp)
+            scales[i*3] = Math.exp(dataView.getFloat32(offset, true)); offset += 4;
+            scales[i*3+1] = Math.exp(dataView.getFloat32(offset, true)); offset += 4;
+            scales[i*3+2] = Math.exp(dataView.getFloat32(offset, true)); offset += 4;
+
+            // Rotation quaternion (normalized)
+            rotations[i*4] = dataView.getFloat32(offset, true); offset += 4;
+            rotations[i*4+1] = dataView.getFloat32(offset, true); offset += 4;
+            rotations[i*4+2] = dataView.getFloat32(offset, true); offset += 4;
+            rotations[i*4+3] = dataView.getFloat32(offset, true); offset += 4;
+        }
+
+        // Center the model
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < vertexCount; i++) {
+            cx += positions[i*3];
+            cy += positions[i*3+1];
+            cz += positions[i*3+2];
+        }
+        cx /= vertexCount;
+        cy /= vertexCount;
+        cz /= vertexCount;
+
+        for (let i = 0; i < vertexCount; i++) {
+            positions[i*3] -= cx;
+            positions[i*3+1] -= cy;
+            positions[i*3+2] -= cz;
+        }
+
+        this.splats = { positions, colors, opacities, scales, rotations, count: vertexCount };
+        this.createBuffers();
+
+        // Calculate optimal camera distance
+        let maxDist = 0;
+        for (let i = 0; i < vertexCount; i++) {
+            const d = Math.sqrt(
+                positions[i*3]**2 +
+                positions[i*3+1]**2 +
+                positions[i*3+2]**2
+            );
+            maxDist = Math.max(maxDist, d);
+        }
+        this.camera.distance = maxDist * 2;
+
+        return vertexCount;
+    }
+
+    createBuffers() {
+        const gl = this.gl;
+        const s = this.splats;
+
+        // Position buffer
+        this.posBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, s.positions, gl.STATIC_DRAW);
+
+        // Color buffer
+        this.colorBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, s.colors, gl.STATIC_DRAW);
+
+        // Opacity buffer
+        this.opacityBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.opacityBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, s.opacities, gl.STATIC_DRAW);
+
+        // Scale buffer
+        this.scaleBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.scaleBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, s.scales, gl.STATIC_DRAW);
+
+        // Rotation buffer
+        this.rotBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.rotBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, s.rotations, gl.STATIC_DRAW);
+    }
+
+    getViewMatrix() {
+        const c = this.camera;
+        const eye = [
+            Math.sin(c.rotY) * Math.cos(c.rotX) * c.distance + c.panX,
+            Math.sin(c.rotX) * c.distance + c.panY,
+            Math.cos(c.rotY) * Math.cos(c.rotX) * c.distance
+        ];
+
+        const target = [c.panX, c.panY, 0];
+        const up = [0, 1, 0];
+
+        // lookAt matrix
+        const zAxis = normalize([eye[0]-target[0], eye[1]-target[1], eye[2]-target[2]]);
+        const xAxis = normalize(cross(up, zAxis));
+        const yAxis = cross(zAxis, xAxis);
+
+        return new Float32Array([
+            xAxis[0], yAxis[0], zAxis[0], 0,
+            xAxis[1], yAxis[1], zAxis[1], 0,
+            xAxis[2], yAxis[2], zAxis[2], 0,
+            -dot(xAxis, eye), -dot(yAxis, eye), -dot(zAxis, eye), 1
+        ]);
+    }
+
+    getProjMatrix() {
+        const aspect = this.canvas.width / this.canvas.height;
+        const fov = this.camera.fov * Math.PI / 180;
+        const near = 0.01;
+        const far = 1000;
+
+        const f = 1 / Math.tan(fov / 2);
+        const nf = 1 / (near - far);
+
+        return new Float32Array([
+            f/aspect, 0, 0, 0,
+            0, f, 0, 0,
+            0, 0, (far+near)*nf, -1,
+            0, 0, 2*far*near*nf, 0
+        ]);
+    }
+
+    render() {
+        const gl = this.gl;
+
+        if (!this.splats) {
+            requestAnimationFrame(() => this.render());
+            return;
+        }
+
+        gl.clearColor(0.1, 0.1, 0.1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.enable(gl.PROGRAM_POINT_SIZE);
+        gl.disable(gl.DEPTH_TEST);
+
+        gl.useProgram(this.program);
+
+        // Set uniforms
+        gl.uniformMatrix4fv(this.uniforms.viewMatrix, false, this.getViewMatrix());
+        gl.uniformMatrix4fv(this.uniforms.projMatrix, false, this.getProjMatrix());
+        gl.uniform2f(this.uniforms.viewport, this.canvas.width, this.canvas.height);
+
+        const c = this.camera;
+        const camPos = [
+            Math.sin(c.rotY) * Math.cos(c.rotX) * c.distance + c.panX,
+            Math.sin(c.rotX) * c.distance + c.panY,
+            Math.cos(c.rotY) * Math.cos(c.rotX) * c.distance
+        ];
+        gl.uniform3fv(this.uniforms.camPos, camPos);
+
+        // Bind attributes
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
+        gl.enableVertexAttribArray(this.attribs.position);
+        gl.vertexAttribPointer(this.attribs.position, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
+        gl.enableVertexAttribArray(this.attribs.color);
+        gl.vertexAttribPointer(this.attribs.color, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.opacityBuffer);
+        gl.enableVertexAttribArray(this.attribs.opacity);
+        gl.vertexAttribPointer(this.attribs.opacity, 1, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.scaleBuffer);
+        gl.enableVertexAttribArray(this.attribs.scale);
+        gl.vertexAttribPointer(this.attribs.scale, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.rotBuffer);
+        gl.enableVertexAttribArray(this.attribs.rotation);
+        gl.vertexAttribPointer(this.attribs.rotation, 4, gl.FLOAT, false, 0, 0);
+
+        // Draw
+        gl.drawArrays(gl.POINTS, 0, this.splats.count);
+
+        requestAnimationFrame(() => this.render());
+    }
+}
+
+// Math helpers
+function normalize(v) {
+    const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    return [v[0]/len, v[1]/len, v[2]/len];
+}
+
+function cross(a, b) {
+    return [
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    ];
+}
+
+function dot(a, b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+// Initialize
+async function init() {
+    const canvas = document.getElementById('canvas');
+    const loading = document.getElementById('loading');
+    const errorDiv = document.getElementById('error');
+
+    try {
+        const viewer = new GaussianSplatViewer(canvas);
+
+        // Get PLY URL from query params
+        const params = new URLSearchParams(window.location.search);
+        const plyPath = params.get('ply');
+
+        if (!plyPath) {
+            loading.style.display = 'none';
+            errorDiv.textContent = 'No PLY file specified';
+            errorDiv.style.display = 'block';
+            return;
+        }
+
+        // Load the PLY
+        const count = await viewer.loadPLY(plyPath);
+        loading.style.display = 'none';
+
+        document.getElementById('info').textContent =
+            `${count.toLocaleString()} splats | Drag to rotate | Scroll to zoom | Shift+drag to pan`;
+
+        // Start rendering
+        viewer.render();
+
+    } catch (e) {
+        console.error(e);
+        loading.style.display = 'none';
+        errorDiv.textContent = 'Error: ' + e.message;
+        errorDiv.style.display = 'block';
+    }
+}
+
+init();
+</script>
+</body>
+</html>
