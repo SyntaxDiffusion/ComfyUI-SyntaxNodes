@@ -1,0 +1,7 @@
+# The repository historically contains CRLF files. Treat CR as part of the
+# line ending during whitespace checks while preserving real trailing-space
+# detection on source and documentation files.
+*.py whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.toml whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.txt whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

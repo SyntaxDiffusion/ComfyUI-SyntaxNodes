@@ -5,6 +5,7 @@ from comfy.utils import ProgressBar
 import random
 import math
 import cv2
+from .audio_envelope_handler import AudioEnvelopeHandler
 
 
 class PixelScatterNode:
@@ -14,6 +15,9 @@ class PixelScatterNode:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Get standard audio inputs
+        audio_inputs = AudioEnvelopeHandler.get_standard_inputs()
+
         return {
             "required": {
                 "image": ("IMAGE",),
@@ -39,9 +43,15 @@ class PixelScatterNode:
                 # --- End Appearance ---
                 "background_color": ("COLOR", {"default": "#000000"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "frame_index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Starting frame offset for audio envelope mapping"
+                }),
             },
             "optional": {
                 "mask": ("MASK",), # Mask applies to where the effect is calculated
+                **audio_inputs
             }
         }
 
@@ -53,7 +63,7 @@ class PixelScatterNode:
         """Convert mask to proper format and shape - copied from working node"""
         if mask is None:
             return np.ones((target_shape[0], target_shape[1]), dtype=np.float32)
-        
+
         # Convert tensor to numpy if needed
         if torch.is_tensor(mask):
             # Handle different tensor formats
@@ -62,39 +72,110 @@ class PixelScatterNode:
             elif len(mask.shape) == 3:  # CHW format
                 mask = mask[0]  # Take first channel
             mask = mask.cpu().numpy()
-        
+
         # Ensure mask is float32 and properly scaled
         mask = mask.astype(np.float32)
         if mask.max() > 1.0:
             mask = mask / 255.0
-        
+
         # Resize mask to match target shape
         if mask.shape[0] != target_shape[0] or mask.shape[1] != target_shape[1]:
-            mask = cv2.resize(mask, (target_shape[1], target_shape[0]), 
+            mask = cv2.resize(mask, (target_shape[1], target_shape[0]),
                             interpolation=cv2.INTER_LINEAR)
-        
+
         return mask
 
     def process_image(self, image, base_block_size, render_threshold, stochastic_drop_chance,
                       max_jitter_distance, jitter_luminance_power,
                       color_mode, unused_matrix_color, unused_matrix_intensity,
                       size_mode, min_draw_size, size_luminance_power, alpha_luminance_power,
-                      background_color, seed, mask=None):
+                      background_color, seed, frame_index=0, mask=None,
+                      # Audio envelope parameters
+                      kick_envelope="", snare_envelope="", hihat_envelope="",
+                      bass_envelope="", drums_envelope="", vocals_envelope="", other_envelope="",
+                      envelope_intensity=1.0, envelope_mode="multiply",
+                      kick_weight=1.0, snare_weight=0.5, hihat_weight=0.3,
+                      bass_weight=0.7, vocals_weight=0.5):
+
         # --- Setup ---
         device = image.device
         batch_size, H, W, _ = image.shape
         pbar = ProgressBar(batch_size)
-        
+
+        # Get envelope duration for mapping video frames to audio frames
+        envelope_total_frames = 0
+        for env_str in [kick_envelope, snare_envelope, hihat_envelope, bass_envelope,
+                       drums_envelope, vocals_envelope, other_envelope]:
+            if env_str:
+                env_data = AudioEnvelopeHandler.parse_envelope_json(env_str)
+                envelope_total_frames = max(envelope_total_frames, env_data.get('total_frames', 0))
+
+        # Calculate frame mapping: video frames → envelope frames
+        if envelope_total_frames > 0 and batch_size > 0:
+            frame_scale = envelope_total_frames / batch_size
+            print(f"[PixelScatterNode] Mapping {batch_size} video frames to {envelope_total_frames} envelope frames (scale={frame_scale:.2f}x)")
+        else:
+            frame_scale = 1.0
+            print(f"[PixelScatterNode] Using 1:1 frame mapping (no envelope or batch_size={batch_size})")
+
         # Determine background color based on mode
         if color_mode == "Black Background":
             bg_color_rgb = (0, 0, 0)  # Force black background
         else:  # "Original Color"
             bg_color_rgb = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
-        
+
         processed_tensors = []
         master_seed = seed
 
         for idx in range(batch_size):
+            # Map video frame to envelope frame proportionally
+            envelope_frame = int(idx * frame_scale) + frame_index
+
+            # Clamp to valid envelope range
+            if envelope_total_frames > 0:
+                envelope_frame = min(envelope_frame, envelope_total_frames - 1)
+            envelope_frame = max(0, envelope_frame)
+
+            # Get stem values WITHOUT adaptive processing for more variation
+            stems = AudioEnvelopeHandler.get_all_stems(
+                envelope_frame,
+                kick_envelope, snare_envelope, hihat_envelope,
+                bass_envelope, drums_envelope, vocals_envelope, other_envelope,
+                adaptive=False  # Use RAW values for more dynamic range
+            )
+
+            # Map stems to effect parameters with DIRECT mapping
+            # Low frequencies (kick + bass) → jitter distance (movement/chaos)
+            kick_val = stems['kick']
+            bass_val = stems['bass']
+            snare_val = stems['snare']
+            hihat_val = stems['hihat']
+
+            # max_jitter_distance: MULTIPLIES on kick/bass
+            jitter_multiplier = 1.0 + ((kick_val * kick_weight + bass_val * bass_weight) * 3.0 * envelope_intensity)
+            mod_jitter_distance = int(max_jitter_distance * jitter_multiplier)
+
+            # stochastic_drop_chance: ADDS on snare (more glitchiness)
+            drop_add = snare_val * snare_weight * 0.3 * envelope_intensity
+            mod_drop_chance = stochastic_drop_chance + drop_add
+
+            # alpha_luminance_power: MULTIPLIES on overall energy (brightness)
+            overall_energy = (kick_val + snare_val + hihat_val) / 3.0
+            alpha_multiplier = 1.0 + (overall_energy * 1.5 * envelope_intensity)
+            mod_alpha_power = alpha_luminance_power * alpha_multiplier
+
+            # Ensure valid ranges
+            mod_jitter_distance = int(np.clip(mod_jitter_distance, 0, 2048))
+            mod_drop_chance = float(np.clip(mod_drop_chance, 0.0, 1.0))
+            mod_alpha_power = float(np.clip(mod_alpha_power, 0.0, 3.0))
+
+            # DEBUG: Show modulation for first few frames or when there's activity
+            has_activity = kick_val > 0.1 or snare_val > 0.1 or bass_val > 0.1
+            if has_activity or idx < 3:
+                print(f"[PixelScatterNode] Video frame {idx} → Envelope frame {envelope_frame}:")
+                print(f"  STEMS: kick={kick_val:.3f}, snare={snare_val:.3f}, bass={bass_val:.3f}, hihat={hihat_val:.3f}")
+                print(f"  RESULT: jitter {max_jitter_distance}→{mod_jitter_distance}, drop_chance {stochastic_drop_chance:.2f}→{mod_drop_chance:.2f}, alpha_power {alpha_luminance_power:.2f}→{mod_alpha_power:.2f}")
+
             current_seed = master_seed + idx
             random.seed(current_seed)
             np.random.seed(current_seed)
@@ -108,10 +189,10 @@ class PixelScatterNode:
                 processed_tensors.append(self.p2t(placeholder)); continue
 
             pil_image_rgb = pil_image.convert('RGB')
-            
+
             # Get mask for this frame using the robust method
             mask_array = self.get_mask_array(
-                mask[idx] if mask is not None and idx < mask.shape[0] else None, 
+                mask[idx] if mask is not None and idx < mask.shape[0] else None,
                 (H, W)
             )
 
@@ -119,43 +200,43 @@ class PixelScatterNode:
             if mask is not None:
                 # Start with original image as base
                 base_image = pil_image_rgb.copy()
-                # Create effect image with scatter effect
+                # Create effect image with scatter effect (use modulated parameters)
                 effect_image = self.create_point_scatter_with_mask(
                     pil_image_rgb, mask_array, base_block_size, bg_color_rgb,
-                    render_threshold, stochastic_drop_chance,
-                    max_jitter_distance, jitter_luminance_power,
-                    color_mode, size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                    render_threshold, mod_drop_chance,
+                    mod_jitter_distance, jitter_luminance_power,
+                    color_mode, size_mode, min_draw_size, size_luminance_power, mod_alpha_power
                 )
-                
+
                 # Blend base and effect using mask
                 base_array = np.array(base_image)
                 effect_array = np.array(effect_image)
                 mask_array_3d = np.stack([mask_array] * 3, axis=-1)
-                
+
                 final_array = base_array * (1 - mask_array_3d) + effect_array * mask_array_3d
                 processed_image = Image.fromarray(final_array.astype(np.uint8))
             else:
-                # No mask - apply to entire image as before
+                # No mask - apply to entire image as before (use modulated parameters)
                 processed_image = self.create_point_scatter(
                     pil_image_rgb, base_block_size, bg_color_rgb,
-                    render_threshold, stochastic_drop_chance,
-                    max_jitter_distance, jitter_luminance_power,
-                    color_mode, size_mode, min_draw_size, size_luminance_power, alpha_luminance_power
+                    render_threshold, mod_drop_chance,
+                    mod_jitter_distance, jitter_luminance_power,
+                    color_mode, size_mode, min_draw_size, size_luminance_power, mod_alpha_power
                 )
 
             # --- Output ---
             processed_tensor = self.p2t(processed_image)
-            if processed_tensor is not None: 
+            if processed_tensor is not None:
                 processed_tensors.append(processed_tensor)
             pbar.update_absolute(idx + 1)
 
         # --- Batch Concat ---
-        if not processed_tensors: 
+        if not processed_tensors:
             print("Error: No images processed."); return (image,)
         tensors_on_device = [t.to(device) for t in processed_tensors]
-        try: 
+        try:
             final_output = torch.cat(tensors_on_device, dim=0)
-        except Exception as e: 
+        except Exception as e:
             print(f"Error concatenating: {e}"); return(image,)
         return (final_output,)
 
@@ -164,7 +245,7 @@ class PixelScatterNode:
                                      color_mode, size_mode, min_size, size_power, alpha_power):
         """Create scatter effect - mask is applied per-pixel during effect calculation"""
         width, height = image_rgb.size
-        if width == 0 or height == 0: 
+        if width == 0 or height == 0:
             return Image.new('RGB', (1, 1), background_color)
 
         W_blocks = math.ceil(width / block_size)
@@ -178,11 +259,11 @@ class PixelScatterNode:
             for xb in range(W_blocks):
                 x_start, y_start = xb * block_size, yb * block_size
                 x_end, y_end = min(width, x_start + block_size), min(height, y_start + block_size)
-                
+
                 # Get average mask value for this block
                 block_mask = mask_array[y_start:y_end, x_start:x_end]
                 mask_value = np.mean(block_mask) if block_mask.size > 0 else 0.0
-                
+
                 # Skip if mask value is too low
                 if mask_value < 0.01:
                     continue
@@ -192,7 +273,7 @@ class PixelScatterNode:
                 region = image_rgb.crop(sample_box)
                 if region.size[0] <= 0 or region.size[1] <= 0:
                     continue
-                
+
                 try:
                     stat = ImageStat.Stat(region)
                     avg_color_float = stat.mean[:3]

@@ -4,6 +4,12 @@
 
 A collection of custom nodes for ComfyUI designed to apply various image processing effects, stylizations, and analyses.
 
+## Featured: Feedback Sampler (Prompt Scheduled)
+
+A Deforum-style feedback sampler with built-in batch prompt scheduling and **full 4D and 5D latent support** — it works with classic image models (SD1.5, SDXL, Flux — `[B,C,H,W]` latents) *and* temporal/video-style models like Qwen and Wan (`[B,C,T,H,W]` latents). Zoom, rotation, and translation transforms preserve the channel/time axis order on 5D latents, so video-model feedback loops don't scramble frames. Built on [Adam Pizurny's FeedbackSampler](https://github.com/pizurny/Comfyui-FeedbackSampler). [Full documentation below.](#feedback-sampler-prompt-scheduled)
+
+![Feedback Sampler (Prompt Scheduled) example](examples/feedback_sampler_prompt_scheduled.gif)
+
 ## Features
 
 This pack includes the following nodes:
@@ -21,6 +27,7 @@ This pack includes the following nodes:
 *   [Paper Craft Effect](#paper-craft-effect)
 *   [Ghosting/Afterimage Effect](#ghostingafterimage-effect)
 *   [Luminance-Based Lines](#luminance-based-lines)
+*   Pixel Scatter Effect
 
 **Analysis & Visualization:**
 
@@ -38,9 +45,17 @@ This pack includes the following nodes:
 *   [Load Gaussian Splat](#load-gaussian-splat)
 *   [Save Gaussian Splat](#save-gaussian-splat)
 
+**Sampling & Animation:**
+
+*   [Feedback Sampler (Prompt Scheduled)](#feedback-sampler-prompt-scheduled) — prompt-scheduled feedback animation with 4D & 5D latent support
+*   [Prompt Travel KSampler](#prompt-travel-ksampler)
+*   SD-CN Feedback Animation / SD-CN Feedback Animation (Audio Reactive)
+
 **Utility & Synchronization:**
 
 *   [Beat Sync](#beat-sync)
+*   Beat Sync (Advanced)
+*   Audio-Reactive Template
   
 
 ## Installation
@@ -48,8 +63,10 @@ This pack includes the following nodes:
 1.  Navigate to your ComfyUI `custom_nodes` directory:
     *   `cd ComfyUI/custom_nodes/`
 2.  Clone this repository:
-    *   `git clone https://github.com/dream-computing/syntax_nodes.git`
-3.  Restart ComfyUI.
+    *   `git clone https://github.com/SyntaxDiffusion/ComfyUI-SyntaxNodes.git`
+3.  Install the Python dependencies:
+    *   `pip install -r ComfyUI-SyntaxNodes/requirements.txt`
+4.  Restart ComfyUI.
 
 *(to-do: Add instructions for installation via ComfyUI Manager.)*
 
@@ -423,6 +440,82 @@ Save/copy a Gaussian Splat PLY file with a custom name to the output directory.
 
 **Outputs:**
 *   `saved_path`: Path to the saved PLY file.
+
+---
+
+### Feedback Sampler (Prompt Scheduled)
+
+A Deforum-style animation sampler that feeds each finished latent back into itself, with built-in FizzNodes-style batch prompt scheduling — no external BatchPromptSchedule node needed. Found under **SyntaxNodes/Sampling**. Built on [Adam Pizurny's Comfyui-FeedbackSampler](https://github.com/pizurny/Comfyui-FeedbackSampler).
+
+**4D and 5D latent support:** all latent operations — zoom, 2D/3D rotation, translation, noise injection — handle both standard 4D image latents (`[batch, channels, height, width]`: SD1.5, SDXL, Flux, Krea) and 5D temporal latents (`[batch, channels, time, height, width]`: Qwen, Wan, and other video models). On 5D latents the temporal axis is explicitly moved alongside the batch axis before spatial transforms and restored afterwards, so channel and time data are never reinterpreted in the wrong order — feedback animation works on video-model latents the same way it does on image-model latents.
+
+Each frame the previous output is transformed (zoom, rotation, translation) and re-sampled at a low denoise. Optional color matching, sharpening, and noise controls are available but default off so repeated frames stay in latent space without accumulating VAE or enhancement artifacts. Prompts can travel across frames via a schedule.
+
+Works with variable-length text encoders (Qwen, Flux Krea, etc.) — conditioning is automatically padded to matching lengths, which stock FizzNodes scheduling does not handle.
+
+Wan and other temporal VAEs are supported. Their decoded `T,H,W,C` frame layout is preserved during the enhancement round trip instead of being mistaken for a normal image batch.
+
+**Prompt scheduling:** connect a `CLIP` and fill `prompt_schedule` using the FizzNodes format:
+
+```
+"0" :"a serene forest, morning light",
+"60" :"a burning forest at dusk --neg smoke haze",
+"120" :"a snowy forest at night"
+```
+
+Negative prompts can be embedded per-keyframe with `--neg`, or supplied as a separate `negative_prompt_schedule`. Alternatively, connect pre-built conditioning to `positive`/`negative` (static) or `positive_batch`/`negative_batch` (e.g. from FizzNodes) — the schedule inputs simply take priority when set.
+
+Built-in schedules use normal linear conditioning interpolation for existing image-model modes. Krea2 is detected automatically and uses a short smoothstep transition near each keyframe instead of averaging its stacked Qwen hidden states across the full interval. Mixed conditioning is limited to the first 25% of active structural sampling; the remaining 75% snaps back to the nearest pure prompt for texture and detail. Outside transition frames no averaged conditioning is carried. Pre-built batch conditioning is always respected as supplied.
+
+**Key Parameters:**
+*   `model`, `seed`, `steps`, `cfg`, `sampler_name`, `scheduler`, `latent_image`, `denoise`: Standard KSampler parameters (frame 0 uses `denoise`, subsequent frames use `feedback_denoise`).
+*   `iterations`: Number of frames to generate.
+*   `feedback_denoise`: Denoise strength for diffused feedback frames — lower preserves more of the previous frame. Zoom-in and zoom-out both re-diffuse the full transformed frame at this value.
+*   `frame_cadence`: Deforum-style diffusion cadence. `1` diffuses every frame (the existing behavior); `2+` diffuses interval keyframes while motion-transforming intermediate frames without a sampler pass.
+*   `seed_variation`: `fixed`, `increment`, or `random` seed per frame.
+*   `zoom_value`, `angle`, `translation_x/y/z`, `rotation_3d_x/y/z`: Static per-frame motion. Each has a matching `*_schedule` string input (`"0:(0.0), 60:(0.1)"`) that overrides the static value with keyframed motion.
+*   `color_coherence` / `color_coherence_strength`: Histogram matching (`LAB`/`RGB`/`HSV`) against the first frame to stop color bleeding. Requires a `vae`.
+*   `noise_amount` / `noise_type`, `sharpen_amount`, `contrast_boost`: Detail-retention enhancements applied in pixel space each frame.
+*   `lumina_mode`, `temporal_smoothing`, `cond_blend_strength`: Smoothing presets/controls for reduced flicker (tuned for Lumina/zImage-style models).
+*   `mask`: Optional user-controlled mask (single or batch) restricting which areas get re-diffused each frame. Zoom-out does not create an automatic outpaint mask.
+
+**Outputs:**
+*   `final_latent`: The last generated frame.
+*   `all_latents`: All frames as a latent batch, ready for VAE decode and video combine.
+
+*Batch mode:* feeding a latent batch (batch > 1) processes each input latent once through the feedback chain instead of looping on a single latent.
+
+During execution, the node uses one sequence-wide progress bar, keeps ComfyUI's live latent preview active during every diffusion pass, pushes a preview after each completed frame, and displays a rolling ETA after the first frame completes. These updates are display-only and do not alter sampler inputs or results.
+
+For a clean starting point, use `zoom_value=0.005`, `feedback_denoise=0.3`, `seed_variation=fixed`, `color_coherence=None`, `noise_amount=0`, `sharpen_amount=0`, and `contrast_boost=1.0`. Enable pixel-space enhancements only when they solve a visible problem, since every VAE round trip can accumulate softness or noise over a long sequence.
+
+---
+
+### Prompt Travel KSampler
+
+An all-in-one prompt travel sampler under **SyntaxNodes/Sampling**. Enter any number of prompts separated by `|` and it handles CLIP encoding, SLERP noise interpolation between keyframes, and LERP conditioning interpolation internally, outputting a latent batch ready for VAE decode → video.
+
+```
+a beautiful sunrise over mountains | a bright noon sky | a golden sunset | a starry night
+```
+
+**Key Parameters:**
+*   `model`, `clip`, `vae`, `seed`, `steps`, `cfg`, `sampler_name`, `scheduler`, `denoise`: Standard sampling parameters.
+*   `prompts`: Prompts separated by `|` — as many as you want.
+*   `negative_prompt`: Applied to all frames.
+*   `width` / `height`: Output resolution. Latent channel count and downscale ratio are derived from the model/VAE, so 16-channel models (Flux, Krea, SD3) work out of the box.
+*   `frames_per_transition`: Frames generated between each pair of prompts.
+*   `interpolation_mode`: `slerp` (spherical, smoother) or `lerp` (linear).
+*   `loop`: Loop back to the first prompt at the end for seamless cycles.
+
+**Output:** `latent_batch` — one latent per frame across all transitions.
+
+---
+
+## Credits
+
+*   **[FizzNodes](https://github.com/FizzleDorf/ComfyUI_FizzNodes)** by FizzleDorf — the batch prompt scheduling in this pack (schedule parsing, prompt interpolation, and batch conditioning in `syntax_schedule/`) is ported from FizzNodes' BatchPromptSchedule, with added support for variable-length text encoders. These nodes in turn build on the [Deforum](https://github.com/deforum-art/sd-webui-deforum) A1111 extension.
+*   **[Comfyui-FeedbackSampler](https://github.com/pizurny/Comfyui-FeedbackSampler)** by Adam Pizurny — the original standalone FeedbackSampler that the Feedback Sampler (Prompt Scheduled) node is built from.
 
 ---
 

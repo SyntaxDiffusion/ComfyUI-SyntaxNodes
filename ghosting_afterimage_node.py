@@ -3,6 +3,7 @@ import cv2
 from PIL import Image
 import torch
 from comfy.utils import ProgressBar
+from .audio_envelope_handler import AudioEnvelopeHandler
 
 class GhostingNode:
     def __init__(self):
@@ -11,18 +12,21 @@ class GhostingNode:
         
     @classmethod
     def INPUT_TYPES(cls):
+        # Get standard audio inputs
+        audio_inputs = AudioEnvelopeHandler.get_standard_inputs()
+
         return {
             "required": {
                 "image": ("IMAGE",),
                 "decay_rate": ("FLOAT", {
-                    "default": 0.5, 
-                    "min": 0.0, 
+                    "default": 0.5,
+                    "min": 0.0,
                     "max": 5.0,
                     "step": 0.01
                 }),
                 "blend_opacity": ("FLOAT", {
-                    "default": 0.5, 
-                    "min": 0.0, 
+                    "default": 0.5,
+                    "min": 0.0,
                     "max": 1.0,
                     "step": 0.01
                 }),
@@ -31,10 +35,16 @@ class GhostingNode:
                     "min": 1,
                     "max": 20,
                     "step": 1
-                })
+                }),
+                "frame_index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Starting frame offset for audio envelope mapping"
+                }),
             },
             "optional": {
                 "mask": ("MASK",),
+                **audio_inputs
             }
         }
     
@@ -42,44 +52,97 @@ class GhostingNode:
     FUNCTION = "process_image"
     CATEGORY = "SyntaxNodes/Processing"
     
-    def process_image(self, image, decay_rate, blend_opacity, buffer_size, mask=None):
-        # Check if the input is a batch (has more than 1 in first dimension)
-        if image.shape[0] > 1:
-            # Convert batch to list using ImageBatchToImageList
-            image_list_converter = ImageBatchToImageList()
-            image_list, = image_list_converter.doit(image)
-            
-            # Create a progress bar for batch processing
-            progress = ProgressBar(len(image_list))
-            
-            # Process each image in the list
-            processed_list = []
-            for i, single_image in enumerate(image_list):
-                # Extract mask for this image if provided
-                single_mask = None
-                if mask is not None:
-                    # Handle both batch and single masks
-                    if mask.shape[0] > 1:
-                        mask_list, = image_list_converter.doit(mask)
-                        single_mask = mask_list[i]
-                    else:
-                        single_mask = mask
-                
-                # Process the single image using the original method
-                output, = self._process_single_image(single_image, decay_rate, blend_opacity, buffer_size, single_mask)
-                processed_list.append(output)
-                
-                # Update progress
-                progress.update(1)
-            
-            # Convert list back to batch using ImageListToImageBatch
-            image_batch_converter = ImageListToImageBatch()
-            output_batch, = image_batch_converter.doit(processed_list)
-            
-            return (output_batch,)
+    def process_image(self, image, decay_rate, blend_opacity, buffer_size, frame_index=0, mask=None,
+                     # Audio envelope parameters
+                     kick_envelope="", snare_envelope="", hihat_envelope="",
+                     bass_envelope="", drums_envelope="", vocals_envelope="", other_envelope="",
+                     envelope_intensity=1.0, envelope_mode="multiply",
+                     kick_weight=1.0, snare_weight=0.5, hihat_weight=0.3,
+                     bass_weight=0.7, vocals_weight=0.5):
+
+        # Get batch size and create progress bar
+        batch_size = image.shape[0]
+        pbar = ProgressBar(batch_size)
+
+        # Get envelope duration for mapping video frames to audio frames
+        envelope_total_frames = 0
+        for env_str in [kick_envelope, snare_envelope, hihat_envelope, bass_envelope,
+                       drums_envelope, vocals_envelope, other_envelope]:
+            if env_str:
+                env_data = AudioEnvelopeHandler.parse_envelope_json(env_str)
+                envelope_total_frames = max(envelope_total_frames, env_data.get('total_frames', 0))
+
+        # Calculate frame mapping: video frames → envelope frames
+        if envelope_total_frames > 0 and batch_size > 0:
+            frame_scale = envelope_total_frames / batch_size
+            print(f"[GhostingNode] Mapping {batch_size} video frames to {envelope_total_frames} envelope frames (scale={frame_scale:.2f}x)")
         else:
-            # Process a single image using the original method
-            return self._process_single_image(image, decay_rate, blend_opacity, buffer_size, mask)
+            frame_scale = 1.0
+            print(f"[GhostingNode] Using 1:1 frame mapping (no envelope or batch_size={batch_size})")
+
+        # Process each image in the batch
+        processed_images = []
+        for idx in range(batch_size):
+            # Map video frame to envelope frame proportionally
+            envelope_frame = int(idx * frame_scale) + frame_index
+
+            # Clamp to valid envelope range
+            if envelope_total_frames > 0:
+                envelope_frame = min(envelope_frame, envelope_total_frames - 1)
+            envelope_frame = max(0, envelope_frame)
+
+            # Get stem values WITHOUT adaptive processing for more variation
+            stems = AudioEnvelopeHandler.get_all_stems(
+                envelope_frame,
+                kick_envelope, snare_envelope, hihat_envelope,
+                bass_envelope, drums_envelope, vocals_envelope, other_envelope,
+                adaptive=False  # Use RAW values for more dynamic range
+            )
+
+            # Map stems to effect parameters - Direct mapping
+            # Low freq (kick) → buffer_size (more trails on kick)
+            kick_val = stems['kick']
+            buffer_add = kick_val * 10.0 * envelope_intensity
+            mod_buffer_size = int(buffer_size + buffer_add)
+
+            # Mid freq (snare) → blend_opacity (flash trails on snare)
+            snare_val = stems['snare']
+            opacity_multiplier = 1.0 + (snare_val * 1.5 * envelope_intensity)
+            mod_blend_opacity = blend_opacity * opacity_multiplier
+
+            # Bass → decay_rate (slower decay on bass)
+            bass_val = stems['bass']
+            decay_multiplier = 1.0 + (bass_val * 2.0 * envelope_intensity)
+            mod_decay_rate = decay_rate * decay_multiplier
+
+            # Ensure valid ranges
+            mod_buffer_size = int(np.clip(mod_buffer_size, 1, 20))
+            mod_blend_opacity = float(np.clip(mod_blend_opacity, 0.0, 1.0))
+            mod_decay_rate = float(np.clip(mod_decay_rate, 0.0, 5.0))
+
+            # DEBUG: Show modulation for first few frames or when there's activity
+            has_activity = kick_val > 0.1 or snare_val > 0.1 or bass_val > 0.1
+            if has_activity or idx < 3:
+                print(f"[GhostingNode] Video frame {idx} → Envelope frame {envelope_frame}:")
+                print(f"  STEMS: kick={kick_val:.3f}, snare={snare_val:.3f}, bass={bass_val:.3f}")
+                print(f"  RESULT: buffer_size {buffer_size}→{mod_buffer_size}, opacity {blend_opacity:.2f}→{mod_blend_opacity:.2f}, decay {decay_rate:.2f}→{mod_decay_rate:.2f}")
+
+            # Extract single image and mask from batch
+            single_image = image[idx:idx+1]
+            single_mask = None
+            if mask is not None:
+                if mask.shape[0] > 1:
+                    single_mask = mask[idx:idx+1]
+                else:
+                    single_mask = mask
+
+            # Process the single image with modulated parameters
+            output, = self._process_single_image(single_image, mod_decay_rate, mod_blend_opacity, mod_buffer_size, single_mask)
+            processed_images.append(output)
+            pbar.update_absolute(idx + 1)
+
+        # Concatenate results and return
+        return (torch.cat(processed_images, dim=0),)
     
     def _process_single_image(self, image, decay_rate, blend_opacity, buffer_size, mask=None):
         # Convert from ComfyUI image format to numpy array

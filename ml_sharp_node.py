@@ -102,8 +102,8 @@ class MLSharpNode:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("ply_path", "video_path", "preview_image")
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE", "EXTRINSICS", "INTRINSICS")
+    RETURN_NAMES = ("ply_path", "video_path", "preview_image", "extrinsics", "intrinsics")
     FUNCTION = "process_image"
     CATEGORY = "SyntaxNodes/3D"
     OUTPUT_NODE = True
@@ -209,6 +209,37 @@ class MLSharpNode:
     def _convert_focal_length(self, width: float, height: float, f_mm: float = 30) -> float:
         """Converts a focal length given in mm to pixels (35mm film equivalent)."""
         return f_mm * np.sqrt(width**2.0 + height**2.0) / np.sqrt(36**2 + 24**2)
+
+    def _build_extrinsics(self) -> list:
+        """Build 4x4 identity extrinsics matrix (camera-to-world).
+
+        Returns identity matrix since SHARP predictions are in camera-centric space.
+        """
+        return [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ]
+
+    def _build_intrinsics(self, f_px: float, width: int, height: int) -> list:
+        """Build 3x3 camera intrinsics matrix.
+
+        Args:
+            f_px: Focal length in pixels
+            width: Image width in pixels
+            height: Image height in pixels
+
+        Returns:
+            3x3 intrinsics matrix: [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        """
+        cx = width / 2.0
+        cy = height / 2.0
+        return [
+            [f_px, 0.0, cx],
+            [0.0, f_px, cy],
+            [0.0, 0.0, 1.0]
+        ]
 
     @torch.no_grad()
     def _predict_image(self, image_np: np.ndarray, f_px: float) -> "Gaussians3D":
@@ -365,14 +396,16 @@ class MLSharpNode:
             checkpoint_path: Optional path to custom model checkpoint
 
         Returns:
-            tuple: (ply_file_path, video_path, preview_image)
+            tuple: (ply_file_path, video_path, preview_image, extrinsics, intrinsics)
+                - extrinsics: 4x4 camera-to-world matrix (identity, list[list[float]]) or None on error
+                - intrinsics: 3x3 camera intrinsics matrix (list[list[float]]) or None on error
         """
         if not self.sharp_available:
             # Return error message if sharp not installed
             error_msg = "ERROR: sharp package not installed. Install ml-sharp first."
             print(f"[MLSharpNode] {error_msg}")
             # Return original image as preview with empty paths
-            return ("", "", image)
+            return ("", "", image, None, None)
 
         from sharp.utils.gaussians import save_ply
 
@@ -430,8 +463,10 @@ class MLSharpNode:
             ):
                 video_path = ""
 
-        # Return the paths and original image as preview
-        return (ply_path, video_path, image)
+        # Build camera matrices for output
+        extrinsics = self._build_extrinsics()
+        intrinsics = self._build_intrinsics(f_px, width, height)
+        return (ply_path, video_path, image, extrinsics, intrinsics)
 
 
 class MLSharpBatchNode:
@@ -484,7 +519,7 @@ class MLSharpBatchNode:
             single_image = images[idx:idx+1]
             filename = f"{output_prefix}_{idx:04d}"
 
-            ply_path, _, _ = self.sharp_node.process_image(
+            ply_path, _, _, _, _ = self.sharp_node.process_image(
                 single_image,
                 focal_length_mm,
                 filename,

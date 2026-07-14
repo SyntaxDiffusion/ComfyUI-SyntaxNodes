@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from PIL import Image
 from comfy.utils import ProgressBar
+from .audio_envelope_handler import AudioEnvelopeHandler
 
 class DepthToLidarEffectNode:
     def __init__(self):
@@ -11,6 +12,9 @@ class DepthToLidarEffectNode:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Get standard audio inputs
+        audio_inputs = AudioEnvelopeHandler.get_standard_inputs()
+
         return {
             "required": {
                 "depth_map": ("IMAGE",),
@@ -25,8 +29,14 @@ class DepthToLidarEffectNode:
                     "min": 1,
                     "max": 5,
                     "step": 1
-                })
-            }
+                }),
+                "frame_index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Starting frame offset for audio envelope mapping"
+                }),
+            },
+            "optional": audio_inputs
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -34,14 +44,70 @@ class DepthToLidarEffectNode:
     FUNCTION = "process_depth_map"
     CATEGORY = "SyntaxNodes/Processing"
     
-    def process_depth_map(self, depth_map, smoothing_factor, line_thickness):
+    def process_depth_map(self, depth_map, smoothing_factor, line_thickness, frame_index=0,
+                          # Audio envelope parameters
+                          kick_envelope="", snare_envelope="", hihat_envelope="",
+                          bass_envelope="", drums_envelope="", vocals_envelope="", other_envelope="",
+                          envelope_intensity=1.0, envelope_mode="multiply",
+                          kick_weight=1.0, snare_weight=0.5, hihat_weight=0.3,
+                          bass_weight=0.7, vocals_weight=0.5):
+
+        # Get batch size and create progress bar
         batch_size = depth_map.shape[0]
-        out = []
-        
-        # Initialize progress bar
         pbar = ProgressBar(batch_size)
 
+        # Get envelope duration for mapping video frames to audio frames
+        envelope_total_frames = 0
+        for env_str in [kick_envelope, snare_envelope, hihat_envelope, bass_envelope,
+                       drums_envelope, vocals_envelope, other_envelope]:
+            if env_str:
+                env_data = AudioEnvelopeHandler.parse_envelope_json(env_str)
+                envelope_total_frames = max(envelope_total_frames, env_data.get('total_frames', 0))
+
+        # Calculate frame mapping: video frames → envelope frames
+        if envelope_total_frames > 0 and batch_size > 0:
+            frame_scale = envelope_total_frames / batch_size
+            print(f"[DepthToLidarEffectNode] Mapping {batch_size} video frames to {envelope_total_frames} envelope frames (scale={frame_scale:.2f}x)")
+        else:
+            frame_scale = 1.0
+            print(f"[DepthToLidarEffectNode] Using 1:1 frame mapping (no envelope or batch_size={batch_size})")
+
+        out = []
+
         for b in range(batch_size):
+            # Map video frame to envelope frame proportionally
+            envelope_frame = int(b * frame_scale) + frame_index
+
+            # Clamp to valid envelope range
+            if envelope_total_frames > 0:
+                envelope_frame = min(envelope_frame, envelope_total_frames - 1)
+            envelope_frame = max(0, envelope_frame)
+
+            # Get stem values WITHOUT adaptive processing for more variation
+            stems = AudioEnvelopeHandler.get_all_stems(
+                envelope_frame,
+                kick_envelope, snare_envelope, hihat_envelope,
+                bass_envelope, drums_envelope, vocals_envelope, other_envelope,
+                adaptive=False  # Use RAW values for more dynamic range
+            )
+
+            # Map stems to effect parameters using DIRECT mapping
+            # Mid freq (snare) → line_thickness (thicker lines on snare)
+            snare_val = stems['snare']
+
+            # line_thickness: MULTIPLIES on snare
+            multiplier = 1.0 + (snare_val * 3.0 * envelope_intensity)
+            mod_line_thickness = int(line_thickness * multiplier)
+
+            # Clamp to valid ranges
+            mod_line_thickness = int(np.clip(mod_line_thickness, 1, 5))
+
+            # DEBUG: Show modulation for first few frames or when there's activity
+            has_activity = snare_val > 0.1
+            if has_activity or b < 3:
+                print(f"[DepthToLidarEffectNode] Video frame {b} → Envelope frame {envelope_frame}:")
+                print(f"  STEMS: snare={snare_val:.3f}")
+                print(f"  RESULT: line_thickness {line_thickness}→{mod_line_thickness}")
             # Convert depth map tensor to a PIL image
             depth_image = self.t2p(depth_map[b:b+1])
             depth_array = np.array(depth_image)

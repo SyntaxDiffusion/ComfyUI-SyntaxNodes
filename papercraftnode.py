@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from comfy.utils import ProgressBar
+from .audio_envelope_handler import AudioEnvelopeHandler
 
 class PaperCraftNode:
     def __init__(self):
@@ -9,12 +10,15 @@ class PaperCraftNode:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Get standard audio inputs
+        audio_inputs = AudioEnvelopeHandler.get_standard_inputs()
+
         return {
             "required": {
                 "image": ("IMAGE",),
                 "triangle_size": ("INT", {
-                    "default": 32, 
-                    "min": 8, 
+                    "default": 32,
+                    "min": 8,
                     "max": 128,
                     "step": 4
                 }),
@@ -30,9 +34,15 @@ class PaperCraftNode:
                     "max": 1.0,
                     "step": 0.05
                 }),
+                "frame_index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "tooltip": "Starting frame offset for audio envelope mapping"
+                }),
             },
             "optional": {
                 "mask": ("MASK",),
+                **audio_inputs
             }
         }
 
@@ -117,31 +127,96 @@ class PaperCraftNode:
 
         return result
 
-    def process_image(self, image, triangle_size, fold_depth, shadow_strength, mask=None):
+    def process_image(self, image, triangle_size, fold_depth, shadow_strength, frame_index=0, mask=None,
+                     # Audio envelope parameters
+                     kick_envelope="", snare_envelope="", hihat_envelope="",
+                     bass_envelope="", drums_envelope="", vocals_envelope="", other_envelope="",
+                     envelope_intensity=1.0, envelope_mode="multiply",
+                     kick_weight=1.0, snare_weight=0.5, hihat_weight=0.3,
+                     bass_weight=0.7, vocals_weight=0.5):
+
+        # Get batch size and create progress bar
         batch_size = image.shape[0]
-        processed_images = []
-        
         pbar = ProgressBar(batch_size)
-        
+
+        # Get envelope duration for mapping video frames to audio frames
+        envelope_total_frames = 0
+        for env_str in [kick_envelope, snare_envelope, hihat_envelope, bass_envelope,
+                       drums_envelope, vocals_envelope, other_envelope]:
+            if env_str:
+                env_data = AudioEnvelopeHandler.parse_envelope_json(env_str)
+                envelope_total_frames = max(envelope_total_frames, env_data.get('total_frames', 0))
+
+        # Calculate frame mapping: video frames → envelope frames
+        if envelope_total_frames > 0 and batch_size > 0:
+            frame_scale = envelope_total_frames / batch_size
+            print(f"[PaperCraftNode] Mapping {batch_size} video frames to {envelope_total_frames} envelope frames (scale={frame_scale:.2f}x)")
+        else:
+            frame_scale = 1.0
+            print(f"[PaperCraftNode] Using 1:1 frame mapping (no envelope or batch_size={batch_size})")
+
+        processed_images = []
+
         for b in range(batch_size):
+            # Map video frame to envelope frame proportionally
+            envelope_frame = int(b * frame_scale) + frame_index
+
+            # Clamp to valid envelope range
+            if envelope_total_frames > 0:
+                envelope_frame = min(envelope_frame, envelope_total_frames - 1)
+            envelope_frame = max(0, envelope_frame)
+
+            # Get stem values WITHOUT adaptive processing for more variation
+            stems = AudioEnvelopeHandler.get_all_stems(
+                envelope_frame,
+                kick_envelope, snare_envelope, hihat_envelope,
+                bass_envelope, drums_envelope, vocals_envelope, other_envelope,
+                adaptive=False  # Use RAW values for more dynamic range
+            )
+
+            # Map stems to effect parameters - ULTRA RESPONSIVE direct mapping
+            kick_val = stems['kick']
+            snare_val = stems['snare']
+
+            # fold_depth: DEEPER FOLDS on kick (low freq)
+            # Range: base → base * (1 + 4*kick*intensity)
+            depth_multiplier = 1.0 + (kick_val * 4.0 * envelope_intensity)
+            mod_fold_depth = int(fold_depth * depth_multiplier)
+
+            # shadow_strength: FLASH on snare (mid freq)
+            # Range: base → base + (snare*0.5*intensity)
+            shadow_add = snare_val * 0.5 * envelope_intensity
+            mod_shadow_strength = shadow_strength + shadow_add
+
+            # Clamp to valid ranges
+            mod_fold_depth = int(np.clip(mod_fold_depth, 0, 32))
+            mod_shadow_strength = float(np.clip(mod_shadow_strength, 0.0, 1.0))
+
+            # DEBUG: Show modulation for first few frames or when there's activity
+            has_activity = kick_val > 0.1 or snare_val > 0.1
+            if has_activity or b < 3:
+                print(f"[PaperCraftNode] Video frame {b} → Envelope frame {envelope_frame}:")
+                print(f"  STEMS: kick={kick_val:.3f}, snare={snare_val:.3f}")
+                print(f"  RESULT: depth {fold_depth}→{mod_fold_depth}, shadow {shadow_strength:.2f}→{mod_shadow_strength:.2f}")
+
             # Convert tensor to PIL Image
             pil_image = self.tensor_to_pil(image[b:b+1])
-            
-            # Process the image
-            processed = self.create_papercraft(pil_image, triangle_size, fold_depth, shadow_strength)
-            
+
+            # Process the image with modulated parameters
+            processed = self.create_papercraft(pil_image, triangle_size, mod_fold_depth, mod_shadow_strength)
+
             # Convert back to tensor
             processed_tensor = self.pil_to_tensor(processed)
-            
+
             # Apply mask if provided
             if mask is not None:
                 mask_b = mask[b:b+1] if mask is not None else None
                 if mask_b is not None:
                     processed_tensor = image[b:b+1] * (1 - mask_b) + processed_tensor * mask_b
-            
+
             processed_images.append(processed_tensor)
             pbar.update_absolute(b + 1)
-        
+
         return (torch.cat(processed_images, dim=0),)
 
     def tensor_to_pil(self, tensor):

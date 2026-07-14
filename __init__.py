@@ -1,22 +1,5 @@
-import os
-import sys
-import subprocess
+"""ComfyUI registration for Syntax Nodes."""
 
-print('''
-███████████████████████████████████████████████████████████████████████████████████████████████████████████████████
-█                                                                                                                 █
-█ ___  _   _  _ __  | |_   __ _ __  __  __| |(_) / _| / _| _   _  ___ (_)  ___   _ __       ___   ___   _ __ ___  █
-█/ __|| | | || '_ \ | __| / _` |\ \/ / / _` || || |_ | |_ | | | |/ __|| | / _ \ | '_ \     / __| / _ \ | '_ ` _ \ █
-█\__ \| |_| || | | || |_ | (_| | >  < | (_| || ||  _||  _|| |_| |\__ \| || (_) || | | | _ | (__ | (_) || | | | | |█
-█|___/ \__, ||_| |_| \__| \__,_|/_/\_\ \__,_||_||_|  |_|   \__,_||___/|_| \___/ |_| |_|(_) \___| \___/ |_| |_| |_|█
-█      |___/                                                                                                      █
-█                                                                                                                 █
-███████████████████████████████████████████████████████████████████████████████████████████████████████████████████
-
-''')
-
-
-# Import node modules
 from .jigsaw_puzzle_node import JigsawPuzzleNode
 from .low_poly_node import LowPolyNode
 from .region_boundary_node import RegionBoundaryNode
@@ -24,7 +7,7 @@ from .pointillism import PointillismNode
 from .frequency_beat_sync import FrequencyBeatSyncNode
 from .ghosting_afterimage_node import GhostingNode
 from .depth_to_lidar_effect_node import DepthToLidarEffectNode
-from .LuminanceParticleNode import LuminanceParticleNode # Assuming previous particle node file exists
+from .LuminanceParticleNode import LuminanceParticleNode
 from .edge_measurement_overlay_node import EdgeMeasurementOverlayNode
 from .edge_tracing_node import EdgeTracingNode
 from .variable_line_width_effect_node import VariableLineWidthEffectNode
@@ -38,8 +21,12 @@ from .pixel_scatter_node import PixelScatterNode
 from .audio_reactive_template import AudioReactiveTemplateNode
 from .ml_sharp_node import MLSharpNode, MLSharpBatchNode
 from .preview_3d_gs_node import Preview3DGaussianSplat, PreviewGaussianSplatVideo, LoadGaussianSplat, SaveGaussianSplat
+from .prompt_travel_sampler_node import SyntaxPromptTravelKSampler
+from .sdcn_feedback_animation import SDCNFeedbackAnimation
+from .sdcn_feedback_animation_audio import SDCNFeedbackAnimationAudio
+from .syntax_feedback_sampler import SyntaxFeedbackSampler
 
-# Map the node classes for ComfyUI to recognize them
+
 NODE_CLASS_MAPPINGS = {
     "JigsawPuzzleNode": JigsawPuzzleNode,
     "LowPolyNode": LowPolyNode,
@@ -66,9 +53,13 @@ NODE_CLASS_MAPPINGS = {
     "PreviewGaussianSplatVideo": PreviewGaussianSplatVideo,
     "LoadGaussianSplat": LoadGaussianSplat,
     "SaveGaussianSplat": SaveGaussianSplat,
+    "SyntaxPromptTravelKSampler": SyntaxPromptTravelKSampler,
+    "SDCNFeedbackAnimation": SDCNFeedbackAnimation,
+    "SDCNFeedbackAnimationAudio": SDCNFeedbackAnimationAudio,
+    "SyntaxFeedbackSampler": SyntaxFeedbackSampler,
 }
 
-# Provide user-friendly display names for the nodes
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "JigsawPuzzleNode": "Jigsaw Puzzle Effect",
     "LowPolyNode": "Low Poly Image Processor",
@@ -95,14 +86,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PreviewGaussianSplatVideo": "Preview Gaussian Splat Video",
     "LoadGaussianSplat": "Load Gaussian Splat",
     "SaveGaussianSplat": "Save Gaussian Splat",
+    "SyntaxPromptTravelKSampler": "Prompt Travel KSampler",
+    "SDCNFeedbackAnimation": "SD-CN Feedback Animation",
+    "SDCNFeedbackAnimationAudio": "SD-CN Feedback Animation (Audio Reactive)",
+    "SyntaxFeedbackSampler": "Feedback Sampler (Prompt Scheduled)",
 }
 
-# Web directory for frontend extensions
+
 WEB_DIRECTORY = "web/js"
 
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
-
-
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
-
-print("--- Syntax Nodes: Custom Nodes Loaded ---")
+print("[Syntax Nodes] Custom nodes loaded")

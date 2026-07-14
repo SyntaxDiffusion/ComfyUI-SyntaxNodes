@@ -1,8 +1,7 @@
 [project]
 name = "syntax-nodes"
-description = "a collection of ComfyUI image processing nodes"
-version = "1.1"
-license = "Your License Text Here"
+description = "A collection of ComfyUI image-processing, sampling, and animation nodes"
+version = "1.2.0"
 dependencies = [
     "Pillow",
     "opencv-python",
@@ -10,11 +9,13 @@ dependencies = [
     "torch",
     "librosa",
     "scipy",
-    "mediapipe"
+    "mediapipe",
+    "pandas",
+    "numexpr"
 ]
 
 [project.urls]
-Repository = "https://github.com/dream-computing/syntax-nodes.git"
+Repository = "https://github.com/SyntaxDiffusion/ComfyUI-SyntaxNodes.git"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]

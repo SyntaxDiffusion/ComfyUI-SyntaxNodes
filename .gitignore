@@ -1,0 +1,27 @@
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+tests/_widgets_under_test.mjs
+
+# Local environments and editor state
+.venv/
+venv/
+.env
+.claude/
+.omc/
+
+# Stray PowerShell module cache
+Microsoft/
+
+# Local development artifacts
+HANDOFF.md
+test_envelope_analysis.py
+docs/superpowers/
+nul
+
+# External source checkout used to install Apple's SHARP package locally
+ml-sharp-ComfyUI/
+
