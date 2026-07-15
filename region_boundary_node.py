@@ -1,23 +1,17 @@
 import numpy as np
 import torch
 from PIL import Image
-import subprocess
-import sys
-
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 try:
     from skimage.segmentation import slic, mark_boundaries, watershed
     from skimage.filters import sobel
     from skimage.color import rgb2gray
-    from comfy.utils import ProgressBar
-except ImportError:
-    print("Installing scikit-image...")
-    install_package("scikit-image")
-    from skimage.segmentation import slic, mark_boundaries, watershed
-    from skimage.filters import sobel
-    from skimage.color import rgb2gray
+except ImportError as e:
+    raise ImportError(
+        "RegionBoundaryNode requires scikit-image. Install it with: pip install scikit-image"
+    ) from e
+
+from comfy.utils import ProgressBar
 
 from .audio_envelope_handler import AudioEnvelopeHandler
 

@@ -1,5 +1,4 @@
 import os
-import ssl
 import torch
 import numpy as np
 from PIL import Image
@@ -116,16 +115,14 @@ class MLSharpNode:
         os.makedirs(sharp_dir, exist_ok=True)
         return os.path.join(sharp_dir, MODEL_FILENAME)
 
-    def _download_model_with_ssl_fallback(self, url, dest_path):
-        """Download model with SSL certificate verification fallback."""
+    def _download_model(self, url, dest_path):
+        """Download the model checkpoint with TLS verification enforced."""
         import urllib.request
         import shutil
 
         print(f"[MLSharpNode] Downloading model to: {dest_path}")
 
-        # First try with normal SSL verification
         try:
-            print("[MLSharpNode] Attempting download with SSL verification...")
             with urllib.request.urlopen(url) as response:
                 with open(dest_path, 'wb') as out_file:
                     shutil.copyfileobj(response, out_file)
@@ -133,24 +130,18 @@ class MLSharpNode:
             return True
         except urllib.error.URLError as e:
             if "CERTIFICATE_VERIFY_FAILED" in str(e):
-                print("[MLSharpNode] SSL verification failed, trying with unverified context...")
-                # Create unverified SSL context as fallback
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-                try:
-                    with urllib.request.urlopen(url, context=ssl_context) as response:
-                        with open(dest_path, 'wb') as out_file:
-                            shutil.copyfileobj(response, out_file)
-                    print("[MLSharpNode] Download complete (with SSL bypass)!")
-                    return True
-                except Exception as e2:
-                    print(f"[MLSharpNode] Download failed even with SSL bypass: {e2}")
-                    return False
+                # Never downgrade to an unverified connection for a model
+                # file — fail closed and let the user fix certs or fetch it
+                # themselves over a channel they trust.
+                print(
+                    "[MLSharpNode] TLS certificate verification failed. "
+                    "Fix your certificate store (on many Python installs: "
+                    "pip install --upgrade certifi), or download the model "
+                    "manually and place it at the path above."
+                )
             else:
                 print(f"[MLSharpNode] Download failed: {e}")
-                return False
+            return False
         except Exception as e:
             print(f"[MLSharpNode] Download failed: {e}")
             return False
@@ -186,7 +177,7 @@ class MLSharpNode:
             else:
                 # Need to download
                 print(f"[MLSharpNode] Model not found, downloading from Apple CDN...")
-                if not self._download_model_with_ssl_fallback(DEFAULT_MODEL_URL, model_path):
+                if not self._download_model(DEFAULT_MODEL_URL, model_path):
                     raise RuntimeError(
                         f"Failed to download model. Please download manually from:\n"
                         f"  {DEFAULT_MODEL_URL}\n"

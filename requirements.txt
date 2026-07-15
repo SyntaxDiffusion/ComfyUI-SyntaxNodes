@@ -7,3 +7,4 @@ scipy
 mediapipe
 pandas
 numexpr
+scikit-image

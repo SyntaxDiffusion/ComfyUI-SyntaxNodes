@@ -15,6 +15,8 @@ import comfy.sample
 import comfy.model_management
 import latent_preview
 
+from .syntax_schedule.ScheduleFuncs import pad_with_zeros
+
 
 def slerp(val: float, low: torch.Tensor, high: torch.Tensor) -> torch.Tensor:
     """Spherical linear interpolation between two tensors."""
@@ -74,15 +76,12 @@ def interpolate_cond(cond1: list, cond2: list, alpha: float) -> list:
         if tensor1.shape == tensor2.shape:
             interp_tensor = lerp(alpha, tensor1, tensor2)
         else:
+            # Repeat-pad the shorter sequence (same as the schedule layer) —
+            # zero tokens are out-of-distribution for variable-length
+            # encoders (Qwen/Krea/Flux) and visibly degrade them.
             max_len = max(tensor1.shape[1], tensor2.shape[1])
-            if tensor1.shape[1] < max_len:
-                pad = torch.zeros(tensor1.shape[0], max_len - tensor1.shape[1], tensor1.shape[2],
-                                  device=tensor1.device, dtype=tensor1.dtype)
-                tensor1 = torch.cat([tensor1, pad], dim=1)
-            if tensor2.shape[1] < max_len:
-                pad = torch.zeros(tensor2.shape[0], max_len - tensor2.shape[1], tensor2.shape[2],
-                                  device=tensor2.device, dtype=tensor2.dtype)
-                tensor2 = torch.cat([tensor2, pad], dim=1)
+            tensor1, _ = pad_with_zeros(tensor1, max_len)
+            tensor2, _ = pad_with_zeros(tensor2, max_len)
             interp_tensor = lerp(alpha, tensor1, tensor2)
 
         interp_meta = meta1.copy()

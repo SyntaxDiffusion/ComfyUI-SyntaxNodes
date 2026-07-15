@@ -11,7 +11,8 @@ dependencies = [
     "scipy",
     "mediapipe",
     "pandas",
-    "numexpr"
+    "numexpr",
+    "scikit-image"
 ]
 
 [project.urls]

@@ -1,100 +1,70 @@
-"""ComfyUI registration for Syntax Nodes."""
+"""ComfyUI registration for Syntax Nodes.
 
-from .jigsaw_puzzle_node import JigsawPuzzleNode
-from .low_poly_node import LowPolyNode
-from .region_boundary_node import RegionBoundaryNode
-from .pointillism import PointillismNode
-from .frequency_beat_sync import FrequencyBeatSyncNode
-from .ghosting_afterimage_node import GhostingNode
-from .depth_to_lidar_effect_node import DepthToLidarEffectNode
-from .LuminanceParticleNode import LuminanceParticleNode
-from .edge_measurement_overlay_node import EdgeMeasurementOverlayNode
-from .edge_tracing_node import EdgeTracingNode
-from .variable_line_width_effect_node import VariableLineWidthEffectNode
-from .cyberpunk_window_node import CyberpunkWindowNode
-from .cyberpunk_magnify_node import CyberpunkMagnifyNode
-from .rgb_streak_node import RGBStreakNode
-from .voxel_node import VoxelNode
-from .papercraftnode import PaperCraftNode
-from .frequency_beat_sync_advanced import FrequencyBeatSyncNode as FrequencyBeatSyncNodeAdvanced
-from .pixel_scatter_node import PixelScatterNode
-from .audio_reactive_template import AudioReactiveTemplateNode
-from .ml_sharp_node import MLSharpNode, MLSharpBatchNode
-from .preview_3d_gs_node import Preview3DGaussianSplat, PreviewGaussianSplatVideo, LoadGaussianSplat, SaveGaussianSplat
-from .prompt_travel_sampler_node import SyntaxPromptTravelKSampler
-from .sdcn_feedback_animation import SDCNFeedbackAnimation
-from .sdcn_feedback_animation_audio import SDCNFeedbackAnimationAudio
-from .syntax_feedback_sampler import SyntaxFeedbackSampler
+Each node module is imported independently so a single module failing
+(missing optional dependency, import-time error) only disables that
+module's nodes instead of unloading the entire pack.
+"""
 
+import importlib
+import traceback
 
-NODE_CLASS_MAPPINGS = {
-    "JigsawPuzzleNode": JigsawPuzzleNode,
-    "LowPolyNode": LowPolyNode,
-    "RegionBoundaryNode": RegionBoundaryNode,
-    "PointillismNode": PointillismNode,
-    "FrequencyBeatSyncNode": FrequencyBeatSyncNode,
-    "GhostingNode": GhostingNode,
-    "DepthToLidarEffectNode": DepthToLidarEffectNode,
-    "LuminanceParticleNode": LuminanceParticleNode,
-    "EdgeMeasurementOverlayNode": EdgeMeasurementOverlayNode,
-    "EdgeTracingNode": EdgeTracingNode,
-    "VariableLineWidthEffectNode": VariableLineWidthEffectNode,
-    "CyberpunkWindowNode": CyberpunkWindowNode,
-    "CyberpunkMagnifyNode": CyberpunkMagnifyNode,
-    "RGBStreakNode": RGBStreakNode,
-    "VoxelNode": VoxelNode,
-    "PaperCraftNode": PaperCraftNode,
-    "FrequencyBeatSyncNodeAdvanced": FrequencyBeatSyncNodeAdvanced,
-    "PixelScatterNode": PixelScatterNode,
-    "AudioReactiveTemplateNode": AudioReactiveTemplateNode,
-    "MLSharpNode": MLSharpNode,
-    "MLSharpBatchNode": MLSharpBatchNode,
-    "Preview3DGaussianSplat": Preview3DGaussianSplat,
-    "PreviewGaussianSplatVideo": PreviewGaussianSplatVideo,
-    "LoadGaussianSplat": LoadGaussianSplat,
-    "SaveGaussianSplat": SaveGaussianSplat,
-    "SyntaxPromptTravelKSampler": SyntaxPromptTravelKSampler,
-    "SDCNFeedbackAnimation": SDCNFeedbackAnimation,
-    "SDCNFeedbackAnimationAudio": SDCNFeedbackAnimationAudio,
-    "SyntaxFeedbackSampler": SyntaxFeedbackSampler,
-}
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
 
+# (module_name, [(class_name, mapping_key, display_name), ...])
+_NODE_SPECS = [
+    ("jigsaw_puzzle_node", [("JigsawPuzzleNode", "JigsawPuzzleNode", "Jigsaw Puzzle Effect")]),
+    ("low_poly_node", [("LowPolyNode", "LowPolyNode", "Low Poly Image Processor")]),
+    ("region_boundary_node", [("RegionBoundaryNode", "RegionBoundaryNode", "Region Boundary Node")]),
+    ("pointillism", [("PointillismNode", "PointillismNode", "Pointillism Effect")]),
+    ("frequency_beat_sync", [("FrequencyBeatSyncNode", "FrequencyBeatSyncNode", "Beat Sync")]),
+    ("ghosting_afterimage_node", [("GhostingNode", "GhostingNode", "Ghosting/Afterimage Effect")]),
+    ("depth_to_lidar_effect_node", [("DepthToLidarEffectNode", "DepthToLidarEffectNode", "Depth to LIDAR Effect")]),
+    ("LuminanceParticleNode", [("LuminanceParticleNode", "LuminanceParticleNode", "Luminance Particle Effect")]),
+    ("edge_measurement_overlay_node", [("EdgeMeasurementOverlayNode", "EdgeMeasurementOverlayNode", "Edge Measurement Overlay")]),
+    ("edge_tracing_node", [("EdgeTracingNode", "EdgeTracingNode", "Edge Tracing Animation")]),
+    ("variable_line_width_effect_node", [("VariableLineWidthEffectNode", "VariableLineWidthEffectNode", "Variable Line Width Effect")]),
+    ("cyberpunk_window_node", [("CyberpunkWindowNode", "CyberpunkWindowNode", "Cyberpunk Window Effect")]),
+    ("cyberpunk_magnify_node", [("CyberpunkMagnifyNode", "CyberpunkMagnifyNode", "Cyberpunk Magnify Effect")]),
+    ("rgb_streak_node", [("RGBStreakNode", "RGBStreakNode", "RGB Streak Effect")]),
+    ("voxel_node", [("VoxelNode", "VoxelNode", "Voxel Block Effect")]),
+    ("papercraftnode", [("PaperCraftNode", "PaperCraftNode", "Paper Craft Effect")]),
+    ("frequency_beat_sync_advanced", [("FrequencyBeatSyncNode", "FrequencyBeatSyncNodeAdvanced", "Beat Sync (Advanced)")]),
+    ("pixel_scatter_node", [("PixelScatterNode", "PixelScatterNode", "Pixel Scatter Effect")]),
+    ("audio_reactive_template", [("AudioReactiveTemplateNode", "AudioReactiveTemplateNode", "Audio-Reactive Template")]),
+    ("ml_sharp_node", [
+        ("MLSharpNode", "MLSharpNode", "SHARP 3D Gaussian Splat"),
+        ("MLSharpBatchNode", "MLSharpBatchNode", "SHARP 3D Gaussian Splat (Batch)"),
+    ]),
+    ("preview_3d_gs_node", [
+        ("Preview3DGaussianSplat", "Preview3DGaussianSplat", "Preview 3D Gaussian Splat"),
+        ("PreviewGaussianSplatVideo", "PreviewGaussianSplatVideo", "Preview Gaussian Splat Video"),
+        ("LoadGaussianSplat", "LoadGaussianSplat", "Load Gaussian Splat"),
+        ("SaveGaussianSplat", "SaveGaussianSplat", "Save Gaussian Splat"),
+    ]),
+    ("prompt_travel_sampler_node", [("SyntaxPromptTravelKSampler", "SyntaxPromptTravelKSampler", "Prompt Travel KSampler")]),
+    ("sdcn_feedback_animation", [("SDCNFeedbackAnimation", "SDCNFeedbackAnimation", "SD-CN Feedback Animation")]),
+    ("sdcn_feedback_animation_audio", [("SDCNFeedbackAnimationAudio", "SDCNFeedbackAnimationAudio", "SD-CN Feedback Animation (Audio Reactive)")]),
+    ("syntax_feedback_sampler", [("SyntaxFeedbackSampler", "SyntaxFeedbackSampler", "Feedback Sampler (Prompt Scheduled)")]),
+]
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "JigsawPuzzleNode": "Jigsaw Puzzle Effect",
-    "LowPolyNode": "Low Poly Image Processor",
-    "RegionBoundaryNode": "Region Boundary Node",
-    "PointillismNode": "Pointillism Effect",
-    "FrequencyBeatSyncNode": "Beat Sync",
-    "GhostingNode": "Ghosting/Afterimage Effect",
-    "DepthToLidarEffectNode": "Depth to LIDAR Effect",
-    "LuminanceParticleNode": "Luminance Particle Effect",
-    "EdgeMeasurementOverlayNode": "Edge Measurement Overlay",
-    "EdgeTracingNode": "Edge Tracing Animation",
-    "VariableLineWidthEffectNode": "Variable Line Width Effect",
-    "CyberpunkWindowNode": "Cyberpunk Window Effect",
-    "CyberpunkMagnifyNode": "Cyberpunk Magnify Effect",
-    "RGBStreakNode": "RGB Streak Effect",
-    "VoxelNode": "Voxel Block Effect",
-    "PaperCraftNode": "Paper Craft Effect",
-    "FrequencyBeatSyncNodeAdvanced": "Beat Sync (Advanced)",
-    "PixelScatterNode": "Pixel Scatter Effect",
-    "AudioReactiveTemplateNode": "Audio-Reactive Template",
-    "MLSharpNode": "SHARP 3D Gaussian Splat",
-    "MLSharpBatchNode": "SHARP 3D Gaussian Splat (Batch)",
-    "Preview3DGaussianSplat": "Preview 3D Gaussian Splat",
-    "PreviewGaussianSplatVideo": "Preview Gaussian Splat Video",
-    "LoadGaussianSplat": "Load Gaussian Splat",
-    "SaveGaussianSplat": "Save Gaussian Splat",
-    "SyntaxPromptTravelKSampler": "Prompt Travel KSampler",
-    "SDCNFeedbackAnimation": "SD-CN Feedback Animation",
-    "SDCNFeedbackAnimationAudio": "SD-CN Feedback Animation (Audio Reactive)",
-    "SyntaxFeedbackSampler": "Feedback Sampler (Prompt Scheduled)",
-}
-
+for _module_name, _classes in _NODE_SPECS:
+    try:
+        _module = importlib.import_module(f".{_module_name}", __name__)
+    except Exception:
+        print(f"[Syntax Nodes] Failed to import '{_module_name}' — its nodes are disabled:")
+        traceback.print_exc()
+        continue
+    for _class_name, _key, _display in _classes:
+        _cls = getattr(_module, _class_name, None)
+        if _cls is None:
+            print(f"[Syntax Nodes] '{_module_name}' loaded but has no class '{_class_name}' — skipping")
+            continue
+        NODE_CLASS_MAPPINGS[_key] = _cls
+        NODE_DISPLAY_NAME_MAPPINGS[_key] = _display
 
 WEB_DIRECTORY = "web/js"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
-print("[Syntax Nodes] Custom nodes loaded")
+print(f"[Syntax Nodes] Loaded {len(NODE_CLASS_MAPPINGS)} nodes")

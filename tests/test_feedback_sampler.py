@@ -178,10 +178,10 @@ def test_unbatch_conditioning_preserves_and_slices_tensor_metadata():
 def test_only_consolidated_general_feedback_sampler_is_registered():
     source = (ROOT / "__init__.py").read_text(encoding="utf-8")
 
-    assert '"SyntaxFeedbackSampler": SyntaxFeedbackSampler' in source
-    assert '"FeedbackSampler":' not in source
-    assert '"SDCNFeedbackAnimation": SDCNFeedbackAnimation' in source
-    assert '"SDCNFeedbackAnimationAudio": SDCNFeedbackAnimationAudio' in source
+    assert '"SyntaxFeedbackSampler", "Feedback Sampler (Prompt Scheduled)"' in source
+    assert '"FeedbackSampler",' not in source
+    assert '"SDCNFeedbackAnimation", "SD-CN Feedback Animation"' in source
+    assert '"SDCNFeedbackAnimationAudio", "SD-CN Feedback Animation (Audio Reactive)"' in source
 
 
 def test_feedback_defaults_do_not_accumulate_enhancement_noise():

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 import comfy.samplers
@@ -6,6 +8,7 @@ import gc
 import copy
 
 from .syntax_schedule import schedule_conditioning
+from .syntax_schedule.ScheduleFuncs import pad_with_zeros
 from .syntax_feedback_progress import SyntaxFeedbackProgress
 
 # Try to import scipy for sharpening and noise
@@ -282,6 +285,21 @@ class SyntaxFeedbackSampler:
                 value = keyframes[before_frame] + (keyframes[after_frame] - keyframes[before_frame]) * progress
                 values.append(value)
 
+        return values
+
+    def parse_schedule_or_static(self, schedule_string, max_frames, static_value, name):
+        """
+        Parse a motion schedule string, falling back to the static value when
+        the string is empty or unparseable (instead of crashing mid-render).
+        """
+        if not schedule_string or not schedule_string.strip():
+            return [static_value] * max_frames
+        values = self.parse_schedule(schedule_string, max_frames)
+        if values is None:
+            print(f"[Motion] WARNING: could not parse {name} schedule "
+                  f"{schedule_string!r} — expected format \"0:(0.0), 60:(0.1)\". "
+                  f"Using static value {static_value} instead.")
+            return [static_value] * max_frames
         return values
 
     def parse_prompt_schedule(self, schedule_string, max_frames, clip):
@@ -866,13 +884,13 @@ class SyntaxFeedbackSampler:
         meta_curr = current_cond[0][1] if len(current_cond[0]) > 1 else {}
         meta_prev = previous_cond[0][1] if len(previous_cond[0]) > 1 else {}
 
-        # Pad tensors to same sequence length if needed
+        # Pad tensors to same sequence length if needed. Repeat-pad (same as
+        # the schedule layer): zero tokens are out-of-distribution for
+        # variable-length encoders (Qwen/Krea/Flux) and visibly degrade them.
         if tensor_curr.shape[1] != tensor_prev.shape[1]:
             max_len = max(tensor_curr.shape[1], tensor_prev.shape[1])
-            if tensor_curr.shape[1] < max_len:
-                tensor_curr = F.pad(tensor_curr, (0, 0, 0, max_len - tensor_curr.shape[1]))
-            if tensor_prev.shape[1] < max_len:
-                tensor_prev = F.pad(tensor_prev, (0, 0, 0, max_len - tensor_prev.shape[1]))
+            tensor_curr, _ = pad_with_zeros(tensor_curr, max_len)
+            tensor_prev, _ = pad_with_zeros(tensor_prev, max_len)
 
         # Interpolate conditioning tensors
         blended_tensor = tensor_curr * (1.0 - strength) + tensor_prev * strength
@@ -880,11 +898,15 @@ class SyntaxFeedbackSampler:
         # Create blended metadata
         blended_meta = meta_curr.copy()
 
-        # Interpolate pooled_output if both exist
+        # Interpolate pooled_output if both exist and are shape-compatible;
+        # on mismatch keep the current frame's pooled output rather than raise.
         pooled_curr = meta_curr.get("pooled_output")
         pooled_prev = meta_prev.get("pooled_output")
         if pooled_curr is not None and pooled_prev is not None:
-            blended_meta["pooled_output"] = pooled_curr * (1.0 - strength) + pooled_prev * strength
+            if pooled_curr.shape == pooled_prev.shape:
+                blended_meta["pooled_output"] = pooled_curr * (1.0 - strength) + pooled_prev * strength
+            else:
+                blended_meta["pooled_output"] = pooled_curr
 
         return [[blended_tensor, blended_meta]]
 
@@ -1040,11 +1062,11 @@ class SyntaxFeedbackSampler:
 
         # Apply 2D rotation (angle)
         if angle != 0:
-            # Convert to radians
-            angle_rad = torch.tensor(angle * 3.14159 / 180.0)
-            # Create rotation matrix
-            cos_a = torch.cos(angle_rad)
-            sin_a = torch.sin(angle_rad)
+            # Plain-float trig keeps theta free of CPU-tensor scalars that
+            # would clash with CUDA latents.
+            angle_rad = math.radians(angle)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
 
             # Create affine transformation matrix
             theta = torch.tensor([[
@@ -1108,9 +1130,9 @@ class SyntaxFeedbackSampler:
 
         # rotation_3d_z (roll) - same as 2D angle rotation
         if rotation_3d_z != 0:
-            angle_rad = torch.tensor(rotation_3d_z * 3.14159 / 180.0)
-            cos_a = torch.cos(angle_rad)
-            sin_a = torch.sin(angle_rad)
+            angle_rad = math.radians(rotation_3d_z)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
             theta = torch.tensor([[
                 [cos_a, -sin_a, 0],
                 [sin_a, cos_a, 0]
@@ -1334,14 +1356,14 @@ class SyntaxFeedbackSampler:
         print(f"[Motion] Processing motion schedules...")
 
         # Parse all motion schedules or use static values
-        angle_values = self.parse_schedule(angle_schedule, iterations) if angle_schedule else [angle] * iterations
-        tx_values = self.parse_schedule(translation_x_schedule, iterations) if translation_x_schedule else [translation_x] * iterations
-        ty_values = self.parse_schedule(translation_y_schedule, iterations) if translation_y_schedule else [translation_y] * iterations
-        tz_values = self.parse_schedule(translation_z_schedule, iterations) if translation_z_schedule else [translation_z] * iterations
-        rx_values = self.parse_schedule(rotation_3d_x_schedule, iterations) if rotation_3d_x_schedule else [rotation_3d_x] * iterations
-        ry_values = self.parse_schedule(rotation_3d_y_schedule, iterations) if rotation_3d_y_schedule else [rotation_3d_y] * iterations
-        rz_values = self.parse_schedule(rotation_3d_z_schedule, iterations) if rotation_3d_z_schedule else [rotation_3d_z] * iterations
-        zoom_values = self.parse_schedule(zoom_schedule, iterations) if zoom_schedule else [zoom_value] * iterations
+        angle_values = self.parse_schedule_or_static(angle_schedule, iterations, angle, "angle")
+        tx_values = self.parse_schedule_or_static(translation_x_schedule, iterations, translation_x, "translation_x")
+        ty_values = self.parse_schedule_or_static(translation_y_schedule, iterations, translation_y, "translation_y")
+        tz_values = self.parse_schedule_or_static(translation_z_schedule, iterations, translation_z, "translation_z")
+        rx_values = self.parse_schedule_or_static(rotation_3d_x_schedule, iterations, rotation_3d_x, "rotation_3d_x")
+        ry_values = self.parse_schedule_or_static(rotation_3d_y_schedule, iterations, rotation_3d_y, "rotation_3d_y")
+        rz_values = self.parse_schedule_or_static(rotation_3d_z_schedule, iterations, rotation_3d_z, "rotation_3d_z")
+        zoom_values = self.parse_schedule_or_static(zoom_schedule, iterations, zoom_value, "zoom")
 
         # Print schedule info
         schedules_active = []
@@ -1410,14 +1432,14 @@ class SyntaxFeedbackSampler:
                     negative_conds = negative_conds[:batch_size]
 
             # Parse motion schedules for batch size
-            angle_values = self.parse_schedule(angle_schedule, batch_size) if angle_schedule else [angle] * batch_size
-            tx_values = self.parse_schedule(translation_x_schedule, batch_size) if translation_x_schedule else [translation_x] * batch_size
-            ty_values = self.parse_schedule(translation_y_schedule, batch_size) if translation_y_schedule else [translation_y] * batch_size
-            tz_values = self.parse_schedule(translation_z_schedule, batch_size) if translation_z_schedule else [translation_z] * batch_size
-            rx_values = self.parse_schedule(rotation_3d_x_schedule, batch_size) if rotation_3d_x_schedule else [rotation_3d_x] * batch_size
-            ry_values = self.parse_schedule(rotation_3d_y_schedule, batch_size) if rotation_3d_y_schedule else [rotation_3d_y] * batch_size
-            rz_values = self.parse_schedule(rotation_3d_z_schedule, batch_size) if rotation_3d_z_schedule else [rotation_3d_z] * batch_size
-            zoom_values = self.parse_schedule(zoom_schedule, batch_size) if zoom_schedule else [zoom_value] * batch_size
+            angle_values = self.parse_schedule_or_static(angle_schedule, batch_size, angle, "angle")
+            tx_values = self.parse_schedule_or_static(translation_x_schedule, batch_size, translation_x, "translation_x")
+            ty_values = self.parse_schedule_or_static(translation_y_schedule, batch_size, translation_y, "translation_y")
+            tz_values = self.parse_schedule_or_static(translation_z_schedule, batch_size, translation_z, "translation_z")
+            rx_values = self.parse_schedule_or_static(rotation_3d_x_schedule, batch_size, rotation_3d_x, "rotation_3d_x")
+            ry_values = self.parse_schedule_or_static(rotation_3d_y_schedule, batch_size, rotation_3d_y, "rotation_3d_y")
+            rz_values = self.parse_schedule_or_static(rotation_3d_z_schedule, batch_size, rotation_3d_z, "rotation_3d_z")
+            zoom_values = self.parse_schedule_or_static(zoom_schedule, batch_size, zoom_value, "zoom")
 
             # Process first frame
             print(f"\n[Frame 0/{batch_size}] Starting with denoise={denoise}")

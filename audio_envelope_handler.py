@@ -9,6 +9,21 @@ from typing import Dict, List, Optional, Tuple, Any
 from collections import deque
 
 
+def _mean_run_length(mask: np.ndarray) -> float:
+    """Average length of consecutive True runs in a boolean array."""
+    runs = []
+    count = 0
+    for m in mask:
+        if m:
+            count += 1
+        elif count:
+            runs.append(count)
+            count = 0
+    if count:
+        runs.append(count)
+    return float(np.mean(runs)) if runs else 0.0
+
+
 class EnvelopeProcessor:
     """
     Adaptive processor for individual envelope streams.
@@ -19,6 +34,7 @@ class EnvelopeProcessor:
         self.window_size = window_size
         self.history = deque(maxlen=window_size * 10)  # Keep larger history for statistics
         self.smoothed_values = {}
+        self.last_frame_index = None
         self.peak_value = 0.0
         self.rms_value = 0.0
         self.attack_time = 0
@@ -45,18 +61,19 @@ class EnvelopeProcessor:
         peak = np.max(arr)
         rms = np.sqrt(np.mean(arr ** 2))
 
-        # Detect attack/decay by looking at derivative
+        # Detect attack/decay from how long transients actually take: the
+        # average number of consecutive rising/falling frames. (Slope
+        # magnitudes are amplitudes, not durations — using them as frame
+        # counts produced arbitrary filter speeds.)
         diff = np.diff(arr)
 
-        # Attack: how fast it rises (look for positive slopes)
-        positive_slopes = diff[diff > 0.01]
-        attack_frames = int(np.median(positive_slopes) * 10) if len(positive_slopes) > 0 else 1
-        attack_frames = max(1, min(10, attack_frames))
+        rise_len = _mean_run_length(diff > 0.01)
+        attack_frames = max(1, min(10, int(round(rise_len)))) if rise_len > 0 else 1
 
-        # Decay: how fast it falls (look for negative slopes)
-        negative_slopes = -diff[diff < -0.01]
-        decay_frames = int(np.median(negative_slopes) * 20) if len(negative_slopes) > 0 else 5
-        decay_frames = max(2, min(30, decay_frames))
+        # Decay runs are doubled: the release should feel slower than the
+        # measured fall so hits ring out instead of cutting off.
+        fall_len = _mean_run_length(diff < -0.01)
+        decay_frames = max(2, min(30, int(round(fall_len * 2)))) if fall_len > 0 else 5
 
         # Sparsity: how often it's active vs silent
         threshold = rms * 0.1
@@ -84,15 +101,16 @@ class EnvelopeProcessor:
         Normalize value based on analyzed characteristics.
         Adapts to the dynamic range and intensity of the signal.
         """
-        if not adaptive or characteristics['peak'] == 0:
+        if not adaptive or characteristics['peak'] <= 0:
             return value
 
-        # Use RMS for normalization to preserve dynamics
-        # but prevent over-normalization of quiet signals
-        norm_factor = max(characteristics['rms'] * 2.0, characteristics['peak'] * 0.3)
-        norm_factor = max(0.1, min(1.0, norm_factor))  # Clamp
+        # Peak normalization: rescale so the stem's own loudest hit maps to
+        # 1.0. Linear scaling preserves relative dynamics exactly (no
+        # amplify-then-clip). The floor caps the boost at 4x so near-silent
+        # stems stay near-silent instead of being pinned to full scale.
+        norm_factor = max(characteristics['peak'], 0.25)
 
-        normalized = value / norm_factor if norm_factor > 0 else value
+        normalized = value / norm_factor
 
         # Apply gentle compression for high dynamic range signals
         if characteristics['dynamic_range'] > 20:  # High dynamic range
@@ -105,12 +123,21 @@ class EnvelopeProcessor:
         """
         Apply attack/decay smoothing to value.
         Fast attack, slower decay - typical for audio-reactive effects.
+
+        Smooths against the PREVIOUS frame's smoothed value, so it works on
+        the sequential one-call-per-frame pattern effect nodes actually use.
         """
-        if frame_index not in self.smoothed_values:
+        # Frame counter going backwards means a new run started on this
+        # shared processor — drop state from the previous run.
+        if self.last_frame_index is not None and frame_index < self.last_frame_index:
+            self.smoothed_values.clear()
+        self.last_frame_index = frame_index
+
+        prev_value = self.smoothed_values.get(frame_index - 1)
+        if prev_value is None:
+            # No previous frame to smooth against (start of sequence).
             self.smoothed_values[frame_index] = value
             return value
-
-        prev_value = self.smoothed_values.get(frame_index - 1, value)
 
         # Attack (rising): fast response
         if value > prev_value:
